@@ -29,7 +29,7 @@ const MAX_SIGNALS = 200;
 export interface DashboardState {
   tickers: Record<string, TickerState>;
   signals: SignalRecord[];
-  rate: { krw_per_usd: number; source: string } | null;
+  rate: { krw_per_usdt: number; usdt_per_usd: number; krw_per_usd: number; source: string } | null;
   latency: ExchangeLatencyInfo[];
   connected: boolean;
   tickCount: number;
@@ -56,7 +56,7 @@ export function useWebSocket(): DashboardState {
 
   const pendingRef = useRef<Record<string, TickerState>>({});
   const pendingSignalsRef = useRef<SignalRecord[]>([]);
-  const pendingRateRef = useRef<{ krw_per_usd: number; source: string } | null>(null);
+  const pendingRateRef = useRef<{ krw_per_usdt: number; usdt_per_usd: number; krw_per_usd: number; source: string } | null>(null);
   const pendingLatencyRef = useRef<ExchangeLatencyInfo[] | null>(null);
   const tickAccRef = useRef(0);
 
@@ -102,7 +102,12 @@ export function useWebSocket(): DashboardState {
         signalIdRef.current = signals.length;
 
         const rate = snap.rate
-          ? { krw_per_usd: snap.rate.krw_per_usd, source: snap.rate.source }
+          ? {
+              krw_per_usdt: snap.rate.krw_per_usdt,
+              usdt_per_usd: snap.rate.usdt_per_usd,
+              krw_per_usd: snap.rate.krw_per_usd,
+              source: snap.rate.source,
+            }
           : null;
 
         const latency: ExchangeLatencyInfo[] = snap.latency || [];
@@ -195,6 +200,8 @@ export function useWebSocket(): DashboardState {
         case "rate": {
           const r = msg as ExchangeRate;
           pendingRateRef.current = {
+            krw_per_usdt: parseFloat(r.krw_per_usdt),
+            usdt_per_usd: parseFloat(r.usdt_per_usd),
             krw_per_usd: parseFloat(r.krw_per_usd),
             source: r.source,
           };

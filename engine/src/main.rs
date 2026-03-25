@@ -52,7 +52,8 @@ async fn main() {
 
     let tx = ticker_tx.clone();
     let lt = latency_tracker.clone();
-    tokio::spawn(async move { feeds::binance::run(tx, lt).await });
+    let rm = rate_manager.clone();
+    tokio::spawn(async move { feeds::binance::run(tx, lt, rm).await });
     let tx = ticker_tx.clone();
     let lt = latency_tracker.clone();
     tokio::spawn(async move { feeds::bybit::run(tx, lt).await });
@@ -102,7 +103,10 @@ async fn main() {
                 if tick_count % 3000 == 0 {
                     let rate_info = rate_manager
                         .get_rate()
-                        .map(|r| format!("KRW/USD={:.2} ({:?})", r.krw_per_usd, r.source))
+                        .map(|r| format!(
+                            "KRW/USDT={:.2} USDT/USD={:.6} KRW/USD={:.2}",
+                            r.krw_per_usdt, r.usdt_per_usd, r.krw_per_usd
+                        ))
                         .unwrap_or_else(|| "NO RATE".to_string());
                     info!(
                         "SNAPSHOT: {} {} bid_usd={:.2} ask_usd={:.2} | {rate_info}",

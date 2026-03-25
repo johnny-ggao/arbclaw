@@ -43,6 +43,8 @@ export interface ArbitrageSignal {
 
 export interface ExchangeRate {
   type: "rate";
+  krw_per_usdt: string;
+  usdt_per_usd: string;
   krw_per_usd: string;
   source: "Implied" | "External";
   timestamp: string;

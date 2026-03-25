@@ -5,7 +5,7 @@ import { EXCHANGES, SYMBOLS, EXCHANGE_META, type TickerState } from "@/app/lib/t
 interface Props {
   tickers: Record<string, TickerState>;
   signalCount: number;
-  rate: { krw_per_usd: number; source: string } | null;
+  rate: { krw_per_usdt: number; usdt_per_usd: number; krw_per_usd: number; source: string } | null;
 }
 
 export default function StatsCards({ tickers, signalCount, rate }: Props) {
@@ -47,9 +47,9 @@ export default function StatsCards({ tickers, signalCount, rate }: Props) {
       color: signalCount > 0 ? "var(--green)" : "var(--text-muted)",
     },
     {
-      label: "KRW/USD Rate",
-      value: rate ? rate.krw_per_usd.toFixed(2) : "—",
-      sub: rate?.source,
+      label: "KRW/USDT",
+      value: rate ? rate.krw_per_usdt.toFixed(2) : "—",
+      sub: rate ? `USDT/USD ${rate.usdt_per_usd.toFixed(4)} · KRW/USD ${rate.krw_per_usd.toFixed(2)}` : undefined,
       color: "var(--text-primary)",
     },
   ];

@@ -1,10 +1,17 @@
 "use client";
 import Link from "next/link";
 
+interface RateInfo {
+  krw_per_usdt: number;
+  usdt_per_usd: number;
+  krw_per_usd: number;
+  source: string;
+}
+
 interface Props {
   connected: boolean;
   tickCount: number;
-  rate: { krw_per_usd: number; source: string } | null;
+  rate: RateInfo | null;
 }
 
 export default function StatusBar({ connected, tickCount, rate }: Props) {
@@ -45,11 +52,22 @@ export default function StatusBar({ connected, tickCount, rate }: Props) {
       <div className="flex items-center gap-5 text-xs" style={{ color: "var(--text-muted)" }}>
         <span>{tickCount.toLocaleString()} ticks</span>
         {rate && (
-          <span>
-            KRW/USD{" "}
-            <span style={{ color: "var(--text-secondary)" }}>{rate.krw_per_usd.toFixed(2)}</span>
-            <span className="ml-1 opacity-50">{rate.source}</span>
-          </span>
+          <>
+            <span>
+              KRW/USDT{" "}
+              <span style={{ color: "var(--text-secondary)" }}>{rate.krw_per_usdt.toFixed(2)}</span>
+            </span>
+            <span>
+              USDT/USD{" "}
+              <span style={{ color: rate.usdt_per_usd >= 1 ? "var(--green)" : "var(--red)" }}>
+                {rate.usdt_per_usd.toFixed(4)}
+              </span>
+            </span>
+            <span>
+              KRW/USD{" "}
+              <span style={{ color: "var(--text-secondary)" }}>{rate.krw_per_usd.toFixed(2)}</span>
+            </span>
+          </>
         )}
       </div>
     </header>

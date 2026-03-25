@@ -70,6 +70,8 @@ pub struct TickerSnapshot {
 
 #[derive(Clone, Serialize)]
 pub struct RateEntry {
+    pub krw_per_usdt: f64,
+    pub usdt_per_usd: f64,
     pub krw_per_usd: f64,
     pub source: String,
     pub timestamp: DateTime<Utc>,
@@ -178,6 +180,8 @@ impl DataStore {
 
     pub fn push_rate(&self, rate: &ExchangeRate) {
         let entry = RateEntry {
+            krw_per_usdt: rate.krw_per_usdt.to_f64().unwrap_or(0.0),
+            usdt_per_usd: rate.usdt_per_usd.to_f64().unwrap_or(0.0),
             krw_per_usd: rate.krw_per_usd.to_f64().unwrap_or(0.0),
             source: format!("{:?}", rate.source),
             timestamp: rate.timestamp,

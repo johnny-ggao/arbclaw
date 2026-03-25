@@ -10,6 +10,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
 
 use crate::models::{Exchange, QuoteCurrency, Symbol, Ticker, ALL_SYMBOLS};
+use crate::normalizer::RateManager;
 
 use super::TickerSender;
 use super::connection::connect_ws;
@@ -47,20 +48,21 @@ fn pair_to_symbol(pair: &str) -> Option<Symbol> {
     }
 }
 
-pub async fn run(tx: TickerSender, tracker: Arc<LatencyTracker>) -> Result<()> {
+pub async fn run(tx: TickerSender, tracker: Arc<LatencyTracker>, rate_mgr: Arc<RateManager>) -> Result<()> {
     loop {
-        if let Err(e) = connect_and_stream(&tx, &tracker).await {
+        if let Err(e) = connect_and_stream(&tx, &tracker, &rate_mgr).await {
             error!("[Binance] connection error: {e}, reconnecting in 3s...");
         }
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
 }
 
-async fn connect_and_stream(tx: &TickerSender, tracker: &LatencyTracker) -> Result<()> {
-    let streams: Vec<String> = ALL_SYMBOLS
+async fn connect_and_stream(tx: &TickerSender, tracker: &LatencyTracker, rate_mgr: &RateManager) -> Result<()> {
+    let mut streams: Vec<String> = ALL_SYMBOLS
         .iter()
         .map(|s| format!("{}@bookTicker", symbol_to_pair(s)))
         .collect();
+    streams.push("usdcusdt@bookTicker".to_string());
     let url = format!("{}/{}", WS_URL, streams.join("/"));
 
     info!("[Binance] connecting to {url}");
@@ -77,7 +79,7 @@ async fn connect_and_stream(tx: &TickerSender, tracker: &LatencyTracker) -> Resu
             msg = read.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if let Err(e) = handle_message(&text, tx) {
+                        if let Err(e) = handle_message(&text, tx, rate_mgr) {
                             warn!("[Binance] parse error: {e}");
                         }
                     }
@@ -113,8 +115,22 @@ async fn connect_and_stream(tx: &TickerSender, tracker: &LatencyTracker) -> Resu
     Ok(())
 }
 
-fn handle_message(text: &str, tx: &TickerSender) -> Result<()> {
+fn handle_message(text: &str, tx: &TickerSender, rate_mgr: &RateManager) -> Result<()> {
     let bt: BookTicker = serde_json::from_str(text)?;
+
+    // USDC/USDT pair → derive USDT/USD rate (USDC ≈ 1 USD)
+    if bt.s.to_uppercase() == "USDCUSDT" {
+        let bid = Decimal::from_str(&bt.b)?;
+        let ask = Decimal::from_str(&bt.a)?;
+        let mid = (bid + ask) / Decimal::TWO;
+        // mid = how many USDT per 1 USDC (≈1 USD)
+        // so USDT/USD = 1/mid (how many USD per 1 USDT)
+        if !mid.is_zero() {
+            rate_mgr.update_usdt_usd_rate(Decimal::ONE / mid);
+        }
+        return Ok(());
+    }
+
     let symbol = pair_to_symbol(&bt.s).ok_or_else(|| anyhow::anyhow!("unknown pair: {}", bt.s))?;
     let now = Utc::now();
 

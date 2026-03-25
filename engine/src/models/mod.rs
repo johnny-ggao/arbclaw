@@ -96,6 +96,8 @@ pub struct NormalizedTicker {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExchangeRate {
+    pub krw_per_usdt: Decimal,
+    pub usdt_per_usd: Decimal,
     pub krw_per_usd: Decimal,
     pub source: RateSource,
     pub timestamp: DateTime<Utc>,

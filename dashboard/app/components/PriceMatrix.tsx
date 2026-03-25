@@ -26,16 +26,16 @@ function Cell({ ticker, symbol }: { ticker?: TickerState; symbol: Symbol }) {
     prev.current = ticker.best_bid_usd;
   }, [ticker?.best_bid_usd]);
 
-  if (!ticker) return <td ref={ref} className="px-3 py-2.5 text-center" style={{ color: "var(--text-muted)" }}>—</td>;
+  if (!ticker) return <td ref={ref} className="px-2 sm:px-3 py-2 text-center" style={{ color: "var(--text-muted)" }}>—</td>;
 
   const stale = Date.now() - ticker.updatedAt > 5000;
   const d = symbol === "XRP" ? 4 : 2;
 
   return (
-    <td ref={ref} className="px-3 py-2.5 text-right" style={{ opacity: stale ? 0.3 : 1 }}>
-      <div className="flex items-baseline justify-end gap-3">
-        <span style={{ color: "var(--green)" }}>{fmt(ticker.best_bid_usd, d)}</span>
-        <span style={{ color: "var(--red)" }}>{fmt(ticker.best_ask_usd, d)}</span>
+    <td ref={ref} className="px-2 sm:px-3 py-2 text-right" style={{ opacity: stale ? 0.3 : 1 }}>
+      <div className="flex items-baseline justify-end gap-1 sm:gap-3">
+        <span className="text-xs" style={{ color: "var(--green)" }}>{fmt(ticker.best_bid_usd, d)}</span>
+        <span className="text-xs" style={{ color: "var(--red)" }}>{fmt(ticker.best_ask_usd, d)}</span>
       </div>
       {ticker.quote_currency === "KRW" && (
         <div className="text-right mt-0.5" style={{ color: "var(--text-muted)", fontSize: 10 }}>
@@ -49,22 +49,21 @@ function Cell({ ticker, symbol }: { ticker?: TickerState; symbol: Symbol }) {
 export default function PriceMatrix({ tickers }: Props) {
   return (
     <div className="border rounded" style={{ borderColor: "var(--border)", background: "var(--bg-secondary)" }}>
-      <div className="px-4 py-2.5 border-b flex items-center justify-between" style={{ borderColor: "var(--border)" }}>
+      <div className="px-3 sm:px-4 py-2 border-b flex items-center justify-between" style={{ borderColor: "var(--border)" }}>
         <span className="text-xs font-medium" style={{ color: "var(--text-secondary)" }}>Price Matrix</span>
         <span className="text-xs" style={{ color: "var(--text-muted)" }}>
           <span style={{ color: "var(--green)" }}>Bid</span>
           {" / "}
           <span style={{ color: "var(--red)" }}>Ask</span>
-          {" (USD)"}
         </span>
       </div>
       <div className="overflow-x-auto">
-        <table className="w-full" style={{ minWidth: 520 }}>
+        <table className="w-full" style={{ minWidth: 400 }}>
           <thead>
             <tr style={{ borderBottom: "1px solid var(--border)" }}>
-              <th className="px-4 py-2 text-left text-xs font-normal" style={{ color: "var(--text-muted)" }}>Exchange</th>
+              <th className="px-2 sm:px-4 py-1.5 text-left text-xs font-normal" style={{ color: "var(--text-muted)" }}>Ex</th>
               {SYMBOLS.map(s => (
-                <th key={s} className="px-3 py-2 text-right text-xs font-medium" style={{ color: "var(--text-secondary)" }}>{s}</th>
+                <th key={s} className="px-2 sm:px-3 py-1.5 text-right text-xs font-medium" style={{ color: "var(--text-secondary)" }}>{s}</th>
               ))}
             </tr>
           </thead>
@@ -79,10 +78,10 @@ export default function PriceMatrix({ tickers }: Props) {
                 onMouseEnter={e => (e.currentTarget.style.background = "var(--bg-row-hover)")}
                 onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
               >
-                <td className="px-4 py-2.5 whitespace-nowrap">
-                  <span className="inline-block w-2 h-2 rounded-sm mr-2" style={{ background: EXCHANGE_META[ex].color }} />
+                <td className="px-2 sm:px-4 py-2 whitespace-nowrap">
+                  <span className="inline-block w-2 h-2 rounded-sm mr-1" style={{ background: EXCHANGE_META[ex].color }} />
                   <span className="text-xs font-medium">{ex}</span>
-                  <span className="ml-1.5 text-xs" style={{ color: "var(--text-muted)" }}>{EXCHANGE_META[ex].quote}</span>
+                  <span className="hidden sm:inline ml-1 text-xs" style={{ color: "var(--text-muted)" }}>{EXCHANGE_META[ex].quote}</span>
                 </td>
                 {SYMBOLS.map(sym => (
                   <Cell key={sym} ticker={tickers[`${ex}:${sym}`]} symbol={sym} />

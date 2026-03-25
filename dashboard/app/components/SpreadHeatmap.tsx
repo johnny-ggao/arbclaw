@@ -23,6 +23,13 @@ function cellBg(net: number): string {
   return "rgba(234, 57, 67, 0.12)";
 }
 
+const SHORT_NAMES: Record<Exchange, string> = {
+  Binance: "Bin",
+  Bybit: "Byb",
+  Upbit: "Up",
+  Bithumb: "Bit",
+};
+
 export default function SpreadHeatmap({ tickers }: Props) {
   const [sym, setSym] = useState<Symbol>("BTC");
 
@@ -35,14 +42,14 @@ export default function SpreadHeatmap({ tickers }: Props) {
 
   return (
     <div className="border rounded" style={{ borderColor: "var(--border)", background: "var(--bg-secondary)" }}>
-      <div className="px-4 py-2.5 border-b flex items-center justify-between" style={{ borderColor: "var(--border)" }}>
+      <div className="px-3 sm:px-4 py-2 border-b flex items-center justify-between" style={{ borderColor: "var(--border)" }}>
         <span className="text-xs font-medium" style={{ color: "var(--text-secondary)" }}>Spread Matrix</span>
         <div className="flex">
           {SYMBOLS.map(s => (
             <button
               key={s}
               onClick={() => setSym(s)}
-              className="px-2.5 py-1 text-xs cursor-pointer transition-colors"
+              className="px-2 py-1 text-xs cursor-pointer transition-colors"
               style={{
                 color: sym === s ? "var(--text-primary)" : "var(--text-muted)",
                 background: sym === s ? "var(--bg-card-hover)" : "transparent",
@@ -54,33 +61,40 @@ export default function SpreadHeatmap({ tickers }: Props) {
           ))}
         </div>
       </div>
-      <div className="p-2 overflow-x-auto">
+      <div className="p-1.5 sm:p-2 overflow-x-auto">
         <table className="w-full">
           <thead>
             <tr>
-              <th className="px-2 py-1.5 text-left text-xs font-normal" style={{ color: "var(--text-muted)", width: 90 }}>
-                Buy↓ Sell→
+              <th className="px-1 sm:px-2 py-1 text-left text-xs font-normal" style={{ color: "var(--text-muted)", width: 60 }}>
+                <span className="hidden sm:inline">Buy↓ Sell→</span>
+                <span className="sm:hidden">B↓S→</span>
               </th>
               {EXCHANGES.map(ex => (
-                <th key={ex} className="px-2 py-1.5 text-center text-xs font-normal" style={{ color: "var(--text-muted)" }}>{ex}</th>
+                <th key={ex} className="px-1 sm:px-2 py-1 text-center text-xs font-normal" style={{ color: "var(--text-muted)" }}>
+                  <span className="hidden sm:inline">{ex}</span>
+                  <span className="sm:hidden">{SHORT_NAMES[ex]}</span>
+                </th>
               ))}
             </tr>
           </thead>
           <tbody>
             {EXCHANGES.map(bx => (
               <tr key={bx}>
-                <td className="px-2 py-1.5 text-xs font-medium">{bx}</td>
+                <td className="px-1 sm:px-2 py-1 text-xs font-medium">
+                  <span className="hidden sm:inline">{bx}</span>
+                  <span className="sm:hidden">{SHORT_NAMES[bx]}</span>
+                </td>
                 {EXCHANGES.map(sx => {
-                  if (bx === sx) return <td key={sx} className="px-2 py-3 text-center" style={{ color: "var(--text-muted)" }}>—</td>;
+                  if (bx === sx) return <td key={sx} className="px-1 py-2 text-center" style={{ color: "var(--text-muted)" }}>—</td>;
                   const sp = matrix[`${bx}:${sx}`];
                   return (
-                    <td key={sx} className="px-2 py-2 text-center rounded" style={{ background: sp ? cellBg(sp.net) : "transparent" }}>
+                    <td key={sx} className="px-1 sm:px-2 py-1.5 sm:py-2 text-center rounded" style={{ background: sp ? cellBg(sp.net) : "transparent" }}>
                       {sp ? (
                         <>
                           <div className="text-xs font-medium" style={{ color: sp.net >= 0 ? "var(--green)" : "var(--red)" }}>
-                            {sp.net >= 0 ? "+" : ""}{sp.net.toFixed(3)}%
+                            {sp.net >= 0 ? "+" : ""}{sp.net.toFixed(2)}%
                           </div>
-                          <div style={{ fontSize: 9, color: "var(--text-muted)", marginTop: 1 }}>
+                          <div className="hidden sm:block" style={{ fontSize: 9, color: "var(--text-muted)", marginTop: 1 }}>
                             {sp.gross >= 0 ? "+" : ""}{sp.gross.toFixed(3)}%
                           </div>
                         </>

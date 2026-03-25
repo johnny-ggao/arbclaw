@@ -71,43 +71,36 @@ export default function PerformancePage() {
     <div className="min-h-screen flex flex-col" style={{ background: "var(--bg-primary)" }}>
       {/* Header */}
       <header
-        className="flex items-center justify-between px-5 h-12 border-b"
+        className="flex items-center justify-between px-3 sm:px-5 h-11 border-b"
         style={{ background: "var(--bg-secondary)", borderColor: "var(--border)" }}
       >
-        <div className="flex items-center gap-6">
+        <div className="flex items-center gap-2 sm:gap-6">
           <span className="text-sm font-bold" style={{ color: "var(--text-primary)" }}>
-            CEX Arbitrage
+            CEX Arb
           </span>
           <nav className="flex items-center gap-1 text-xs">
-            <Link
-              href="/"
-              className="px-3 py-1.5 rounded transition-colors"
-              style={{ color: "var(--text-muted)" }}
-            >
-              实时监控
+            <Link href="/" className="px-2 sm:px-3 py-1 rounded transition-colors" style={{ color: "var(--text-muted)" }}>
+              监控
             </Link>
-            <span
-              className="px-3 py-1.5 rounded"
-              style={{ color: "var(--text-primary)", background: "var(--bg-card-hover)" }}
-            >
-              绩效分析
+            <span className="px-2 sm:px-3 py-1 rounded" style={{ color: "var(--text-primary)", background: "var(--bg-card-hover)" }}>
+              绩效
             </span>
           </nav>
         </div>
       </header>
 
-      <main className="flex-1 p-4 lg:p-6 max-w-[1400px] mx-auto w-full">
+      <main className="flex-1 p-3 sm:p-4 lg:p-6 max-w-[1400px] mx-auto w-full">
         {/* Title + Period */}
-        <div className="flex items-center justify-between mb-5">
-          <h1 className="text-lg font-bold" style={{ color: "var(--text-primary)" }}>
+        <div className="flex items-center justify-between mb-4 gap-2">
+          <h1 className="text-base sm:text-lg font-bold shrink-0" style={{ color: "var(--text-primary)" }}>
             绩效仪表板
           </h1>
-          <div className="flex rounded overflow-hidden border" style={{ borderColor: "var(--border)" }}>
+          <div className="flex rounded overflow-hidden border shrink-0" style={{ borderColor: "var(--border)" }}>
             {PERIODS.map((p) => (
               <button
                 key={p.key}
                 onClick={() => setPeriod(p.key)}
-                className="px-3 py-1.5 text-xs cursor-pointer transition-colors"
+                className="px-2 sm:px-3 py-1 text-xs cursor-pointer transition-colors"
                 style={{
                   background: period === p.key ? "var(--bg-card-hover)" : "transparent",
                   color: period === p.key ? "var(--text-primary)" : "var(--text-muted)",
@@ -131,17 +124,17 @@ export default function PerformancePage() {
         ) : (
           <>
             {/* Stat Cards */}
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-5">
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-2 sm:gap-3 mb-4">
               {cards.map((c) => (
                 <div
                   key={c.label}
-                  className="rounded-lg border px-5 py-4"
+                  className="rounded-lg border px-3 sm:px-5 py-3 sm:py-4"
                   style={{ borderColor: "var(--border)", background: "var(--bg-card)" }}
                 >
-                  <div className="text-xs mb-2" style={{ color: "var(--text-muted)" }}>
+                  <div className="text-xs mb-1.5" style={{ color: "var(--text-muted)" }}>
                     {c.label}
                   </div>
-                  <div className="text-xl font-bold font-mono" style={{ color: c.color }}>
+                  <div className="text-base sm:text-xl font-bold font-mono" style={{ color: c.color }}>
                     {c.value}
                   </div>
                 </div>
@@ -149,7 +142,7 @@ export default function PerformancePage() {
             </div>
 
             {/* Charts Row 1 */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 mb-3">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-2 sm:gap-3 mb-2 sm:mb-3">
               <div
                 className="rounded-lg border p-4"
                 style={{ borderColor: "var(--border)", background: "var(--bg-card)" }}
@@ -171,7 +164,7 @@ export default function PerformancePage() {
             </div>
 
             {/* Charts Row 2 */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-2 sm:gap-3">
               <div
                 className="rounded-lg border p-4"
                 style={{ borderColor: "var(--border)", background: "var(--bg-card)" }}

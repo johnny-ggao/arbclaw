@@ -22,14 +22,77 @@ log()  { echo -e "${GREEN}[+]${NC} $*"; }
 warn() { echo -e "${YELLOW}[!]${NC} $*"; }
 err()  { echo -e "${RED}[✗]${NC} $*"; exit 1; }
 
+# --- Auto-install dependencies ---
+
+install_docker() {
+    log "Docker not found. Installing..."
+    if [ "$(uname)" = "Linux" ]; then
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update -qq
+            apt-get install -y -qq ca-certificates curl gnupg
+            install -m 0755 -d /etc/apt/keyrings
+            curl -fsSL https://download.docker.com/linux/$(. /etc/os-release && echo "$ID")/gpg \
+                | gpg --dearmor -o /etc/apt/keyrings/docker.gpg 2>/dev/null
+            chmod a+r /etc/apt/keyrings/docker.gpg
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+                https://download.docker.com/linux/$(. /etc/os-release && echo "$ID") \
+                $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
+                > /etc/apt/sources.list.d/docker.list
+            apt-get update -qq
+            apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin
+        elif command -v yum >/dev/null 2>&1; then
+            yum install -y -q yum-utils
+            yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
+            yum install -y -q docker-ce docker-ce-cli containerd.io docker-compose-plugin
+        elif command -v dnf >/dev/null 2>&1; then
+            dnf install -y -q dnf-plugins-core
+            dnf config-manager --add-repo https://download.docker.com/linux/fedora/docker-ce.repo
+            dnf install -y -q docker-ce docker-ce-cli containerd.io docker-compose-plugin
+        else
+            warn "Unsupported package manager. Trying convenience script..."
+            curl -fsSL https://get.docker.com | sh
+        fi
+        systemctl enable --now docker 2>/dev/null || true
+    elif [ "$(uname)" = "Darwin" ]; then
+        err "macOS detected. Please install Docker Desktop: https://docs.docker.com/desktop/install/mac-install/"
+    else
+        err "Unsupported OS. Install Docker manually: https://docs.docker.com/engine/install/"
+    fi
+
+    command -v docker >/dev/null 2>&1 || err "Docker installation failed."
+    log "Docker installed successfully: $(docker --version)"
+}
+
+install_git() {
+    log "Git not found. Installing..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq && apt-get install -y -qq git
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y -q git
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y -q git
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --quiet git
+    else
+        err "Cannot auto-install git. Please install manually."
+    fi
+    command -v git >/dev/null 2>&1 || err "Git installation failed."
+    log "Git installed successfully: $(git --version)"
+}
+
 # --- Pre-flight checks ---
 
-command -v docker >/dev/null 2>&1 || err "Docker not found. Install: https://docs.docker.com/engine/install/"
-command -v git    >/dev/null 2>&1 || err "Git not found. Install: apt install git / yum install git"
+command -v git    >/dev/null 2>&1 || install_git
+command -v docker >/dev/null 2>&1 || install_docker
 
 if ! docker compose version >/dev/null 2>&1; then
-    err "Docker Compose V2 not found. Update Docker or install compose plugin."
+    warn "Docker Compose plugin not found, attempting install..."
+    install_docker
+    docker compose version >/dev/null 2>&1 || err "Docker Compose V2 still not available. Install manually."
 fi
+
+log "Docker: $(docker --version)"
+log "Compose: $(docker compose version)"
 
 # --- Determine project directory ---
 

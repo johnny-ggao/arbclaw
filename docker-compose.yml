@@ -1,0 +1,26 @@
+services:
+  engine:
+    build: ./engine
+    container_name: arbclaw-engine
+    environment:
+      - RUST_LOG=info
+    restart: unless-stopped
+
+  dashboard:
+    build: ./dashboard
+    container_name: arbclaw-dashboard
+    depends_on:
+      - engine
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    container_name: arbclaw-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - engine
+      - dashboard
+    restart: unless-stopped

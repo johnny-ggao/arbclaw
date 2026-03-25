@@ -1,0 +1,25 @@
+[package]
+name = "cex-arb-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+rustls = { version = "0.23", features = ["ring"] }
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+chrono = { version = "0.4", features = ["serde"] }
+rust_decimal = { version = "1", features = ["serde-with-str"] }
+rust_decimal_macros = "1"
+anyhow = "1"
+flate2 = "1"
+warp = "0.3"
+parking_lot = "0.12"
+async-http-proxy = { version = "1", features = ["runtime-tokio", "basic-auth"] }
+tokio-rustls = "0.26"
+webpki-roots = "0.26"

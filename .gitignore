@@ -1,0 +1,25 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Engine
+engine/target/
+
+# Dashboard
+dashboard/node_modules/
+dashboard/.next/
+dashboard/out/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log

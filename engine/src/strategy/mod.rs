@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use crate::models::*;
 
 const DEFAULT_TRADE_AMOUNT_USD: Decimal = dec!(10000);
-const MIN_NET_SPREAD_PCT: Decimal = dec!(2.0); // 2.0%
+const MIN_SPREAD_PCT: Decimal = dec!(2.0); // 2.0% gross (fees excluded from threshold)
 
 pub struct ArbitrageEngine {
     latest: RwLock<HashMap<(Exchange, Symbol), NormalizedTicker>>,
@@ -20,7 +20,7 @@ impl ArbitrageEngine {
         Self {
             latest: RwLock::new(HashMap::new()),
             trade_amount_usd: DEFAULT_TRADE_AMOUNT_USD,
-            min_spread: MIN_NET_SPREAD_PCT,
+            min_spread: MIN_SPREAD_PCT,
         }
     }
 
@@ -79,7 +79,7 @@ impl ArbitrageEngine {
                 let total_fee = (buy_ex.taker_fee() + sell_ex.taker_fee()) * hundred;
                 let net_spread = gross_spread - total_fee;
 
-                if net_spread < self.min_spread {
+                if gross_spread < self.min_spread {
                     continue;
                 }
 

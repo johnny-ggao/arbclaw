@@ -10,8 +10,7 @@ function getSpread(bx: Exchange, sx: Exchange, sym: Symbol, t: Record<string, Ti
   const b = t[`${bx}:${sym}`], s = t[`${sx}:${sym}`];
   if (!b || !s || b.best_ask_usd === 0) return null;
   const gross = ((s.best_bid_usd - b.best_ask_usd) / b.best_ask_usd) * 100;
-  const fee = (EXCHANGE_META[bx].fee + EXCHANGE_META[sx].fee) * 100;
-  return { gross, net: gross - fee };
+  return { gross };
 }
 
 function cellBg(gross: number): string {

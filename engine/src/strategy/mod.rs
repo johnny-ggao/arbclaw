@@ -76,29 +76,24 @@ impl ArbitrageEngine {
                 }
 
                 let gross_spread = (sell_bid - buy_ask) / buy_ask * hundred;
-                let total_fee = (buy_ex.taker_fee() + sell_ex.taker_fee()) * hundred;
-                let net_spread = gross_spread - total_fee;
 
                 if gross_spread < self.min_spread {
                     continue;
                 }
 
-                // Calculate max quantity and profit
                 let max_qty_by_amount = self.trade_amount_usd / buy_ask;
                 let max_qty = max_qty_by_amount
                     .min(buy_ticker.best_ask_qty)
                     .min(sell_ticker.best_bid_qty);
 
-                let buy_cost = max_qty * buy_ask * (Decimal::ONE + buy_ex.taker_fee());
-                let sell_revenue = max_qty * sell_bid * (Decimal::ONE - sell_ex.taker_fee());
-                let profit = sell_revenue - buy_cost;
+                let profit = max_qty * (sell_bid - buy_ask);
 
                 signals.push(ArbitrageSignal {
                     buy_exchange: buy_ex,
                     sell_exchange: sell_ex,
                     symbol,
                     gross_spread_pct: gross_spread,
-                    net_spread_pct: net_spread,
+                    net_spread_pct: gross_spread,
                     max_qty,
                     estimated_profit_usd: profit,
                     buy_price_usd: buy_ask,

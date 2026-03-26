@@ -19,9 +19,8 @@ export default function StatsCards({ tickers, signalCount, rate }: Props) {
           const b = tickers[`${bx}:${sym}`];
           const s = tickers[`${sx}:${sym}`];
           if (!b || !s || b.best_ask_usd === 0) continue;
-          const net = ((s.best_bid_usd - b.best_ask_usd) / b.best_ask_usd) * 100
-            - (EXCHANGE_META[bx].fee + EXCHANGE_META[sx].fee) * 100;
-          if (net > bestSpread) { bestSpread = net; bestLabel = `${sym} ${bx}→${sx}`; }
+          const gross = ((s.best_bid_usd - b.best_ask_usd) / b.best_ask_usd) * 100;
+          if (gross > bestSpread) { bestSpread = gross; bestLabel = `${sym} ${bx}→${sx}`; }
         }
       }
     }

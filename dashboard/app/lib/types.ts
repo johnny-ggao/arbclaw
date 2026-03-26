@@ -4,11 +4,11 @@ export type Symbol = "BTC" | "ETH" | "SOL" | "XRP";
 export const EXCHANGES: Exchange[] = ["Binance", "Bybit", "Upbit", "Bithumb"];
 export const SYMBOLS: Symbol[] = ["BTC", "ETH", "SOL", "XRP"];
 
-export const EXCHANGE_META: Record<Exchange, { quote: "USDT" | "KRW"; fee: number; color: string }> = {
-  Binance: { quote: "USDT", fee: 0.001, color: "#f0b90b" },
-  Bybit:   { quote: "USDT", fee: 0.001, color: "#f7a600" },
-  Upbit:   { quote: "KRW",  fee: 0.0025, color: "#093687" },
-  Bithumb: { quote: "KRW",  fee: 0.0025, color: "#f26522" },
+export const EXCHANGE_META: Record<Exchange, { quote: "USDT" | "KRW"; color: string }> = {
+  Binance: { quote: "USDT", color: "#f0b90b" },
+  Bybit:   { quote: "USDT", color: "#f7a600" },
+  Upbit:   { quote: "KRW",  color: "#093687" },
+  Bithumb: { quote: "KRW",  color: "#f26522" },
 };
 
 export interface NormalizedTicker {

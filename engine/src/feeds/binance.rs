@@ -16,7 +16,7 @@ use super::connection::connect_ws;
 use super::latency::LatencyTracker;
 use super::{OrderBookSender, TickerSender};
 
-const WS_URL: &str = "wss://stream.binance.com:9443/ws";
+const WS_URL: &str = "wss://stream.binance.com:9443/stream";
 
 #[derive(Debug, Deserialize)]
 struct BookTicker {
@@ -93,7 +93,7 @@ async fn connect_and_stream(
         })
         .collect();
     streams.push("usdcusdt@bookTicker".to_string());
-    let url = format!("{}/{}", WS_URL, streams.join("/"));
+    let url = format!("{}?streams={}", WS_URL, streams.join("/"));
 
     info!("[Binance] connecting to {url}");
     let ws_stream = connect_ws(&url).await?;

@@ -114,7 +114,7 @@ impl RateManager {
         let krw_per_usd = krw_per_usdt / usd_per_usdt;
 
         let source = if self.get_krw_per_usd().is_some() {
-            RateSource::Frankfurter
+            RateSource::Cryprice
         } else {
             RateSource::Implied
         };
@@ -129,35 +129,111 @@ impl RateManager {
     }
 }
 
-/// Fetch KRW/USD rate from Frankfurter API (ECB data, free, no API key)
-pub async fn fetch_frankfurter_krw_usd() -> anyhow::Result<Decimal> {
-    let url = "https://api.frankfurter.dev/v1/latest?base=USD&symbols=KRW";
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()?;
-    let resp: serde_json::Value = client.get(url).send().await?.json().await?;
-    let krw = resp["rates"]["KRW"]
-        .as_f64()
-        .ok_or_else(|| anyhow::anyhow!("missing KRW rate in Frankfurter response"))?;
-    Decimal::from_str(&format!("{krw:.4}"))
-        .map_err(|e| anyhow::anyhow!("parse KRW rate: {e}"))
+/// Fetch KRW/USD rate from Cryprice (scolkg.com) via Socket.IO HTTP polling.
+/// Returns (krw_per_usd, usdt_krw) from the live crypto exchange rate service.
+async fn fetch_cryprice_rates(client: &reqwest::Client) -> anyhow::Result<(Decimal, Option<Decimal>)> {
+    const BASE: &str = "https://ticker1.cryprice.com/socket.io/";
+
+    // Step 1: EIO4 handshake
+    let handshake: String = client
+        .get(format!("{BASE}?EIO=4&transport=polling"))
+        .send().await?.text().await?;
+    // Response: 0{"sid":"...","upgrades":[...],...}
+    let json_start = handshake.find('{').ok_or_else(|| anyhow::anyhow!("bad handshake"))?;
+    let hs: serde_json::Value = serde_json::from_str(&handshake[json_start..])?;
+    let sid = hs["sid"].as_str().ok_or_else(|| anyhow::anyhow!("no sid"))?;
+
+    let mut krw_per_usd: Option<Decimal> = None;
+    let mut usdt_krw: Option<Decimal> = None;
+
+    // Step 2: Connect to default namespace
+    client.post(format!("{BASE}?EIO=4&transport=polling&sid={sid}"))
+        .header("Content-Type", "text/plain;charset=UTF-8")
+        .body("40")
+        .send().await?;
+
+    // Poll for connect ACK (also check for rate data in initial push)
+    let ack = client.get(format!("{BASE}?EIO=4&transport=polling&sid={sid}"))
+        .send().await?.text().await?;
+    parse_cryprice_response(&ack, &mut krw_per_usd, &mut usdt_krw);
+
+    // Step 3: Request rates
+    client.post(format!("{BASE}?EIO=4&transport=polling&sid={sid}"))
+        .header("Content-Type", "text/plain;charset=UTF-8")
+        .body("42[\"request exchangerate usd krw\"]")
+        .send().await?;
+
+    // Step 4: Poll for responses (rate may arrive in the same or next poll)
+    for _ in 0..4 {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let resp = client.get(format!("{BASE}?EIO=4&transport=polling&sid={sid}"))
+            .send().await?.text().await?;
+        parse_cryprice_response(&resp, &mut krw_per_usd, &mut usdt_krw);
+        if krw_per_usd.is_some() {
+            break;
+        }
+        // Retry request in case it was missed
+        let _ = client.post(format!("{BASE}?EIO=4&transport=polling&sid={sid}"))
+            .header("Content-Type", "text/plain;charset=UTF-8")
+            .body("42[\"request exchangerate usd krw\"]")
+            .send().await;
+    }
+
+    // Close the connection gracefully
+    let _ = client.post(format!("{BASE}?EIO=4&transport=polling&sid={sid}"))
+        .header("Content-Type", "text/plain;charset=UTF-8")
+        .body("1")
+        .send().await;
+
+    krw_per_usd.map(|r| (r, usdt_krw))
+        .ok_or_else(|| anyhow::anyhow!("KRW/USD not found in cryprice response"))
 }
 
-/// Spawn a background task that polls Frankfurter API at the given interval
-pub fn spawn_frankfurter_poller(rate_manager: Arc<RateManager>, interval_secs: u64) {
+fn parse_cryprice_response(resp: &str, krw_per_usd: &mut Option<Decimal>, usdt_krw: &mut Option<Decimal>) {
+    for segment in resp.split("42[") {
+        if segment.contains("exchangerateUsdKrw response") {
+            if let Some(start) = segment.rfind(',') {
+                let num_str = segment[start+1..].trim_end_matches(|c: char| c == ']' || c.is_whitespace());
+                if let Ok(v) = Decimal::from_str(num_str) {
+                    *krw_per_usd = Some(v);
+                }
+            }
+        }
+        if segment.contains("usdtprice response") {
+            if let Some(start) = segment.rfind(',') {
+                let num_str = segment[start+1..].trim_end_matches(|c: char| c == ']' || c.is_whitespace());
+                if let Ok(v) = Decimal::from_str(num_str) {
+                    *usdt_krw = Some(v);
+                }
+            }
+        }
+    }
+}
+
+/// Spawn a background task that polls Cryprice for KRW/USD rate
+pub fn spawn_cryprice_poller(rate_manager: Arc<RateManager>, interval_secs: u64) {
     tokio::spawn(async move {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .expect("failed to build HTTP client");
         let mut first = true;
         loop {
-            match fetch_frankfurter_krw_usd().await {
-                Ok(rate) => {
-                    rate_manager.update_krw_usd(rate);
+            match fetch_cryprice_rates(&client).await {
+                Ok((krw_usd, usdt_krw)) => {
+                    rate_manager.update_krw_usd(krw_usd);
                     if first {
-                        info!("Frankfurter KRW/USD initial rate: {rate}");
+                        info!("Cryprice KRW/USD initial rate: {krw_usd}");
+                        if let Some(uk) = usdt_krw {
+                            info!("Cryprice USDT/KRW: {uk}");
+                        }
                         first = false;
+                    } else {
+                        debug!("Cryprice KRW/USD: {krw_usd}");
                     }
                 }
                 Err(e) => {
-                    error!("Frankfurter API error: {e}");
+                    error!("Cryprice rate fetch error: {e}");
                 }
             }
             tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;

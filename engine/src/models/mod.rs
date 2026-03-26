@@ -106,6 +106,7 @@ pub struct ExchangeRate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RateSource {
     Implied,
+    Frankfurter,
     External,
 }
 

@@ -46,7 +46,7 @@ export interface ExchangeRate {
   krw_per_usdt: string;
   usdt_per_usd: string;
   krw_per_usd: string;
-  source: "Implied" | "External";
+  source: "Implied" | "Frankfurter" | "External";
   timestamp: string;
 }
 

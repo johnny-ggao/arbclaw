@@ -2,63 +2,76 @@ use chrono::Utc;
 use parking_lot::RwLock;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::models::*;
 
-const STALE_THRESHOLD_SECS: i64 = 30;
+const USDT_USD_STALE_SECS: i64 = 30;
+const KRW_USD_STALE_SECS: i64 = 1800; // Frankfurter refreshes every 600s, allow 30min staleness
 
 pub struct RateManager {
-    // KRW/USDT: implied from BTC cross-price (Upbit KRW price / Binance USDT price)
-    krw_per_usdt: RwLock<Option<(Decimal, chrono::DateTime<Utc>)>>,
-    // USDT/USD: from Binance USDC/USDT pair (1/mid_price)
-    usdt_per_usd: RwLock<Option<(Decimal, chrono::DateTime<Utc>)>>,
+    // KRW/USD: from Frankfurter API (ECB data)
+    krw_per_usd: RwLock<Option<(Decimal, chrono::DateTime<Utc>)>>,
+    // USDT/USD: from Binance USDC/USDT pair (USD value of 1 USDT)
+    usd_per_usdt: RwLock<Option<(Decimal, chrono::DateTime<Utc>)>>,
+    // KRW/USDT: derived from KRW/USD and USDT/USD (for backward compat with frontend)
+    // Fallback: BTC implied rate when Frankfurter is unavailable
+    implied_krw_per_usdt: RwLock<Option<(Decimal, chrono::DateTime<Utc>)>>,
 }
 
 impl RateManager {
     pub fn new() -> Self {
         Self {
-            krw_per_usdt: RwLock::new(None),
-            usdt_per_usd: RwLock::new(None),
+            krw_per_usd: RwLock::new(None),
+            usd_per_usdt: RwLock::new(None),
+            implied_krw_per_usdt: RwLock::new(None),
         }
     }
 
-    /// Called from normalizer when BTC cross-price is available
+    /// Called from Frankfurter API polling task
+    pub fn update_krw_usd(&self, krw_per_usd: Decimal) {
+        info!("KRW/USD rate updated (Frankfurter): {krw_per_usd}");
+        *self.krw_per_usd.write() = Some((krw_per_usd, Utc::now()));
+    }
+
+    /// Called from Binance feed when USDC/USDT tick arrives
+    /// Stores USD value of 1 USDT (= 1/USDC_USDT_mid)
+    pub fn update_usdt_usd_rate(&self, usd_per_usdt: Decimal) {
+        debug!("USD/USDT rate: {usd_per_usdt}");
+        *self.usd_per_usdt.write() = Some((usd_per_usdt, Utc::now()));
+    }
+
+    /// Fallback: called from normalizer when BTC cross-price is available
     pub fn update_implied_krw_usdt(&self, krw_mid: Decimal, usdt_mid: Decimal) {
         if usdt_mid.is_zero() {
             return;
         }
         let rate = krw_mid / usdt_mid;
-        debug!("implied KRW/USDT rate: {rate}");
-        *self.krw_per_usdt.write() = Some((rate, Utc::now()));
+        debug!("implied KRW/USDT fallback rate: {rate}");
+        *self.implied_krw_per_usdt.write() = Some((rate, Utc::now()));
     }
 
-    /// Called from Binance feed when USDC/USDT tick arrives
-    pub fn update_usdt_usd_rate(&self, usdt_per_usd: Decimal) {
-        debug!("USDT/USD rate: {usdt_per_usd}");
-        *self.usdt_per_usd.write() = Some((usdt_per_usd, Utc::now()));
-    }
-
-    /// Get KRW/USDT rate (for arbitrage calculation between USDT and KRW exchanges)
-    pub fn get_krw_per_usdt(&self) -> Option<Decimal> {
-        let guard = self.krw_per_usdt.read();
+    /// Get KRW/USD from Frankfurter (ECB official rate)
+    pub fn get_krw_per_usd(&self) -> Option<Decimal> {
+        let guard = self.krw_per_usd.read();
         let (rate, ts) = guard.as_ref()?;
         let age = (Utc::now() - *ts).num_seconds();
-        if age > STALE_THRESHOLD_SECS {
-            warn!("KRW/USDT rate stale ({age}s old)");
+        if age > KRW_USD_STALE_SECS {
+            warn!("KRW/USD rate stale ({age}s old)");
             return None;
         }
         Some(*rate)
     }
 
-    /// Get USDT/USD rate (from Binance USDC/USDT). Defaults to 1.0 if not yet available.
-    pub fn get_usdt_per_usd(&self) -> Decimal {
-        let guard = self.usdt_per_usd.read();
+    /// Get USD value of 1 USDT (from Binance USDC/USDT). Defaults to 1.0 if unavailable.
+    pub fn get_usd_per_usdt(&self) -> Decimal {
+        let guard = self.usd_per_usdt.read();
         match guard.as_ref() {
             Some((rate, ts)) => {
                 let age = (Utc::now() - *ts).num_seconds();
-                if age > STALE_THRESHOLD_SECS {
+                if age > USDT_USD_STALE_SECS {
                     warn!("USDT/USD rate stale ({age}s old), using 1.0");
                     Decimal::ONE
                 } else {
@@ -69,50 +82,87 @@ impl RateManager {
         }
     }
 
+    /// Get KRW/USDT rate:
+    /// Primary: derived from Frankfurter KRW/USD and WS USDT/USD
+    /// Fallback: BTC implied cross-price
+    pub fn get_krw_per_usdt(&self) -> Option<Decimal> {
+        // Primary: KRW/USDT = KRW/USD / USD_per_USDT
+        if let Some(krw_usd) = self.get_krw_per_usd() {
+            let usd_per_usdt = self.get_usd_per_usdt();
+            // 1 USDT = usd_per_usdt USD = usd_per_usdt * krw_usd KRW
+            let krw_per_usdt = krw_usd * usd_per_usdt;
+            return Some(krw_per_usdt);
+        }
+
+        // Fallback: BTC implied rate
+        let guard = self.implied_krw_per_usdt.read();
+        if let Some((rate, ts)) = guard.as_ref() {
+            let age = (Utc::now() - *ts).num_seconds();
+            if age <= 30 {
+                warn!("using BTC implied KRW/USDT fallback: {rate}");
+                return Some(*rate);
+            }
+        }
+        None
+    }
+
     /// Build the composite ExchangeRate for broadcasting
     pub fn get_rate(&self) -> Option<ExchangeRate> {
         let krw_per_usdt = self.get_krw_per_usdt()?;
-        let usdt_per_usd = self.get_usdt_per_usd();
-        // KRW/USD = KRW/USDT × USDT/USD
-        // But we want: how many KRW per 1 USD
-        // krw_per_usdt = KRW per 1 USDT
-        // usdt_per_usd = USDT per 1 USD (i.e., 1/USDC_USDT_price, typically ~1.0005)
-        // Wait: USDC/USDT mid = how many USDT for 1 USDC
-        // If USDC=1USD, then mid = USDT_per_USD
-        // So: 1 USD = mid USDT = mid * krw_per_usdt KRW
-        // But we stored usdt_per_usd = 1/mid = USD per 1 USDT
-        // So: krw_per_usd = krw_per_usdt / usdt_per_usd
-        // Actually let me reconsider:
-        // USDC/USDT mid = 0.9998 means 1 USDC costs 0.9998 USDT
-        // USDC ≈ 1 USD, so 1 USD ≈ 0.9998 USDT
-        // In Binance feed: usdt_per_usd = 1/mid = 1/0.9998 ≈ 1.0002 USD per USDT
-        // That's actually USD_per_USDT, not USDT_per_USD. Let me fix naming.
-        //
-        // Correct interpretation:
-        // USDC/USDT mid (e.g., 0.9998) = 1 USDC costs 0.9998 USDT
-        // Since USDC ≈ USD: 1 USD = 0.9998 USDT
-        // We stored: 1/mid = 1.0002 = how many USD you get for 1 USDT
-        // So our stored value is USD_per_USDT = 1/mid
-        //
-        // KRW per USD = KRW_per_USDT * USDT_per_USD = krw_per_usdt * mid
-        // = krw_per_usdt / (1/mid) = krw_per_usdt / usdt_per_usd
-        //
-        // But simpler: let's just store the raw mid as usdt_usd_mid
-        // and compute: krw_per_usd = krw_per_usdt * (1 / usdt_per_usd)
-        // Hmm, let me just be very clear:
+        let usd_per_usdt = self.get_usd_per_usdt();
+        // KRW/USD = KRW/USDT / USD_per_USDT
+        let krw_per_usd = krw_per_usdt / usd_per_usdt;
 
-        // usdt_per_usd field stores: 1/USDC_USDT_mid = USD value of 1 USDT
-        // So: KRW per 1 USD = KRW_per_USDT / USD_per_USDT = krw_per_usdt / usdt_per_usd
-        let krw_per_usd = krw_per_usdt / usdt_per_usd;
+        let source = if self.get_krw_per_usd().is_some() {
+            RateSource::Frankfurter
+        } else {
+            RateSource::Implied
+        };
 
         Some(ExchangeRate {
             krw_per_usdt,
-            usdt_per_usd,
+            usdt_per_usd: usd_per_usdt,
             krw_per_usd,
-            source: RateSource::Implied,
+            source,
             timestamp: Utc::now(),
         })
     }
+}
+
+/// Fetch KRW/USD rate from Frankfurter API (ECB data, free, no API key)
+pub async fn fetch_frankfurter_krw_usd() -> anyhow::Result<Decimal> {
+    let url = "https://api.frankfurter.dev/v1/latest?base=USD&symbols=KRW";
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    let resp: serde_json::Value = client.get(url).send().await?.json().await?;
+    let krw = resp["rates"]["KRW"]
+        .as_f64()
+        .ok_or_else(|| anyhow::anyhow!("missing KRW rate in Frankfurter response"))?;
+    Decimal::from_str(&format!("{krw:.4}"))
+        .map_err(|e| anyhow::anyhow!("parse KRW rate: {e}"))
+}
+
+/// Spawn a background task that polls Frankfurter API at the given interval
+pub fn spawn_frankfurter_poller(rate_manager: Arc<RateManager>, interval_secs: u64) {
+    tokio::spawn(async move {
+        let mut first = true;
+        loop {
+            match fetch_frankfurter_krw_usd().await {
+                Ok(rate) => {
+                    rate_manager.update_krw_usd(rate);
+                    if first {
+                        info!("Frankfurter KRW/USD initial rate: {rate}");
+                        first = false;
+                    }
+                }
+                Err(e) => {
+                    error!("Frankfurter API error: {e}");
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
+        }
+    });
 }
 
 pub struct Normalizer {
@@ -140,7 +190,7 @@ impl Normalizer {
         match ticker.quote_currency {
             QuoteCurrency::USDT => {
                 // Convert USDT to true USD using USDT/USD rate
-                let usd_per_usdt = self.rate_manager.get_usdt_per_usd();
+                let usd_per_usdt = self.rate_manager.get_usd_per_usdt();
                 Some(NormalizedTicker {
                     exchange: ticker.exchange,
                     symbol: ticker.symbol,
@@ -161,7 +211,7 @@ impl Normalizer {
                 if krw_per_usdt.is_zero() {
                     return None;
                 }
-                let usd_per_usdt = self.rate_manager.get_usdt_per_usd();
+                let usd_per_usdt = self.rate_manager.get_usd_per_usdt();
                 // KRW price → USDT → USD
                 // price_usd = (price_krw / krw_per_usdt) * usd_per_usdt
                 let bid_usd = (ticker.best_bid / krw_per_usdt) * usd_per_usdt;

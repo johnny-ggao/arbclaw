@@ -12,7 +12,7 @@ use tracing_subscriber::EnvFilter;
 
 use feeds::latency::LatencyTracker;
 use models::{ExchangeLatency, LatencyReport, OrderBookUpdate, Ticker, WsMessage};
-use normalizer::{Normalizer, RateManager};
+use normalizer::{Normalizer, RateManager, spawn_frankfurter_poller};
 use store::DataStore;
 use strategy::ArbitrageEngine;
 use ws_server::{WsServer, broadcast_message};
@@ -50,6 +50,9 @@ async fn main() {
     tokio::spawn(async move {
         ws_server.run(WS_PORT, store_clone, latency_clone).await;
     });
+
+    // Spawn Frankfurter KRW/USD rate poller (ECB data, refreshes every 600s)
+    spawn_frankfurter_poller(rate_manager.clone(), 600);
 
     // Spawn feeds
     let tx = ticker_tx.clone();

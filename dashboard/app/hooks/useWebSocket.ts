@@ -23,13 +23,21 @@ export interface OrderBookState {
 
 function getWsUrl(): string {
   if (typeof window === "undefined") return "ws://localhost/ws";
+  // If running behind reverse proxy (same port serves both), use current host
+  // Otherwise in dev mode, engine is on port 8765
+  const host = window.location.host;
+  const isDev = host.includes("3000");
   const p = window.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${p}//${window.location.host}/ws`;
+  if (isDev) return "ws://localhost:8765/ws";
+  return `${p}//${host}/ws`;
 }
 
 function getApiBase(): string {
   if (typeof window === "undefined") return "http://localhost";
-  return `${window.location.protocol}//${window.location.host}`;
+  const host = window.location.host;
+  const isDev = host.includes("3000");
+  if (isDev) return "http://localhost:8765";
+  return `${window.location.protocol}//${host}`;
 }
 
 const MAX_SIGNALS = 200;

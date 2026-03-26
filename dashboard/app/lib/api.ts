@@ -1,6 +1,9 @@
 function getApiBase(): string {
   if (typeof window === "undefined") return "http://localhost";
-  return `${window.location.protocol}//${window.location.host}`;
+  const host = window.location.host;
+  const isDev = host.includes("3000");
+  if (isDev) return "http://localhost:8765";
+  return `${window.location.protocol}//${host}`;
 }
 
 export interface HourlyBucket {

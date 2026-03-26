@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use crate::models::*;
 
 const DEFAULT_TRADE_AMOUNT_USD: Decimal = dec!(10000);
-const MIN_NET_SPREAD_PCT: Decimal = dec!(0.1); // 0.1%
+const MIN_NET_SPREAD_PCT: Decimal = dec!(2.0); // 2.0%
 
 pub struct ArbitrageEngine {
     latest: RwLock<HashMap<(Exchange, Symbol), NormalizedTicker>>,

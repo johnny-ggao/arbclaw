@@ -14,12 +14,12 @@ function getSpread(bx: Exchange, sx: Exchange, sym: Symbol, t: Record<string, Ti
   return { gross, net: gross - fee };
 }
 
-function cellBg(net: number): string {
-  if (net > 0.5) return "rgba(0, 192, 118, 0.25)";
-  if (net > 0.1) return "rgba(0, 192, 118, 0.12)";
-  if (net > 0) return "rgba(0, 192, 118, 0.05)";
-  if (net > -0.3) return "transparent";
-  if (net > -0.8) return "rgba(234, 57, 67, 0.06)";
+function cellBg(gross: number): string {
+  if (gross >= 2.0) return "rgba(0, 192, 118, 0.30)";
+  if (gross > 0.5) return "rgba(0, 192, 118, 0.15)";
+  if (gross > 0) return "rgba(0, 192, 118, 0.05)";
+  if (gross > -0.3) return "transparent";
+  if (gross > -1.0) return "rgba(234, 57, 67, 0.06)";
   return "rgba(234, 57, 67, 0.12)";
 }
 
@@ -88,14 +88,11 @@ export default function SpreadHeatmap({ tickers }: Props) {
                   if (bx === sx) return <td key={sx} className="px-1 py-2 text-center" style={{ color: "var(--text-muted)" }}>—</td>;
                   const sp = matrix[`${bx}:${sx}`];
                   return (
-                    <td key={sx} className="px-1 sm:px-2 py-1.5 sm:py-2 text-center rounded" style={{ background: sp ? cellBg(sp.net) : "transparent" }}>
+                    <td key={sx} className="px-1 sm:px-2 py-1.5 sm:py-2 text-center rounded" style={{ background: sp ? cellBg(sp.gross) : "transparent" }}>
                       {sp ? (
                         <>
-                          <div className="text-xs font-medium" style={{ color: sp.net >= 0 ? "var(--green)" : "var(--red)" }}>
-                            {sp.net >= 0 ? "+" : ""}{sp.net.toFixed(2)}%
-                          </div>
-                          <div className="hidden sm:block" style={{ fontSize: 9, color: "var(--text-muted)", marginTop: 1 }}>
-                            {sp.gross >= 0 ? "+" : ""}{sp.gross.toFixed(3)}%
+                          <div className="text-xs font-medium" style={{ color: sp.gross >= 0 ? "var(--green)" : "var(--red)" }}>
+                            {sp.gross >= 0 ? "+" : ""}{sp.gross.toFixed(2)}%
                           </div>
                         </>
                       ) : <span style={{ color: "var(--text-muted)" }}>—</span>}

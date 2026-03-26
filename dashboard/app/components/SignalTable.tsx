@@ -14,7 +14,7 @@ function timeAgo(ts: number): string {
 }
 
 export default function SignalTable({ signals }: Props) {
-  const profitable = signals.filter(s => parseFloat(s.net_spread_pct) > 0);
+  const profitable = signals.filter(s => parseFloat(s.gross_spread_pct) >= 2.0);
   const rows = profitable.length > 0 ? profitable.slice(0, 50) : signals.slice(0, 50);
 
   return (
@@ -35,7 +35,7 @@ export default function SignalTable({ signals }: Props) {
             <thead>
               <tr style={{ borderBottom: "1px solid var(--border)" }}>
                 <th className="px-2 sm:px-4 py-1.5 text-left text-xs font-normal" style={{ color: "var(--text-muted)" }}>Pair</th>
-                <th className="px-2 sm:px-4 py-1.5 text-right text-xs font-normal" style={{ color: "var(--text-muted)" }}>Net</th>
+                <th className="px-2 sm:px-4 py-1.5 text-right text-xs font-normal" style={{ color: "var(--text-muted)" }}>Spread</th>
                 <th className="px-2 sm:px-4 py-1.5 text-right text-xs font-normal hidden sm:table-cell" style={{ color: "var(--text-muted)" }}>Profit</th>
                 <th className="px-2 sm:px-4 py-1.5 text-right text-xs font-normal hidden sm:table-cell" style={{ color: "var(--text-muted)" }}>Qty</th>
                 <th className="px-2 sm:px-4 py-1.5 text-right text-xs font-normal" style={{ color: "var(--text-muted)" }}>Time</th>
@@ -43,9 +43,9 @@ export default function SignalTable({ signals }: Props) {
             </thead>
             <tbody>
               {rows.map(s => {
-                const net = parseFloat(s.net_spread_pct);
+                const gross = parseFloat(s.gross_spread_pct);
                 const profit = parseFloat(s.estimated_profit_usd);
-                const ok = net > 0;
+                const ok = gross >= 2.0;
                 return (
                   <tr
                     key={s.id}
@@ -62,7 +62,7 @@ export default function SignalTable({ signals }: Props) {
                       </span>
                     </td>
                     <td className="px-2 sm:px-4 py-1.5 text-xs text-right font-medium" style={{ color: ok ? "var(--green)" : "var(--red)" }}>
-                      {net >= 0 ? "+" : ""}{net.toFixed(3)}%
+                      {gross >= 0 ? "+" : ""}{gross.toFixed(3)}%
                     </td>
                     <td className="px-2 sm:px-4 py-1.5 text-xs text-right hidden sm:table-cell" style={{ color: profit >= 0 ? "var(--green)" : "var(--red)" }}>
                       ${profit.toFixed(2)}

@@ -1,8 +1,10 @@
 use anyhow::Result;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
+use parking_lot::Mutex;
 use rust_decimal::Decimal;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -20,6 +22,8 @@ const WS_URL: &str = "wss://stream.bybit.com/v5/public/spot";
 #[derive(Debug, Deserialize)]
 struct WsResponse {
     topic: Option<String>,
+    #[serde(rename = "type")]
+    msg_type: Option<String>,
     data: Option<OrderbookData>,
     #[allow(dead_code)]
     op: Option<String>,
@@ -30,6 +34,55 @@ struct OrderbookData {
     s: String,
     b: Vec<[String; 2]>,
     a: Vec<[String; 2]>,
+}
+
+use std::collections::BTreeMap;
+
+struct LocalBook {
+    bids: BTreeMap<Decimal, Decimal>,
+    asks: BTreeMap<Decimal, Decimal>,
+}
+
+impl LocalBook {
+    fn new() -> Self {
+        Self { bids: BTreeMap::new(), asks: BTreeMap::new() }
+    }
+
+    fn apply_snapshot(&mut self, bids: &[[String; 2]], asks: &[[String; 2]]) {
+        self.bids.clear();
+        self.asks.clear();
+        for b in bids {
+            if let (Ok(p), Ok(q)) = (Decimal::from_str(&b[0]), Decimal::from_str(&b[1])) {
+                if !q.is_zero() { self.bids.insert(p, q); }
+            }
+        }
+        for a in asks {
+            if let (Ok(p), Ok(q)) = (Decimal::from_str(&a[0]), Decimal::from_str(&a[1])) {
+                if !q.is_zero() { self.asks.insert(p, q); }
+            }
+        }
+    }
+
+    fn apply_delta(&mut self, bids: &[[String; 2]], asks: &[[String; 2]]) {
+        for b in bids {
+            if let (Ok(p), Ok(q)) = (Decimal::from_str(&b[0]), Decimal::from_str(&b[1])) {
+                if q.is_zero() { self.bids.remove(&p); } else { self.bids.insert(p, q); }
+            }
+        }
+        for a in asks {
+            if let (Ok(p), Ok(q)) = (Decimal::from_str(&a[0]), Decimal::from_str(&a[1])) {
+                if q.is_zero() { self.asks.remove(&p); } else { self.asks.insert(p, q); }
+            }
+        }
+    }
+
+    fn top_bids(&self, n: usize) -> Vec<PriceLevel> {
+        self.bids.iter().rev().take(n).map(|(&p, &q)| PriceLevel { price: p, qty: q }).collect()
+    }
+
+    fn top_asks(&self, n: usize) -> Vec<PriceLevel> {
+        self.asks.iter().take(n).map(|(&p, &q)| PriceLevel { price: p, qty: q }).collect()
+    }
 }
 
 fn symbol_to_pair(s: &Symbol) -> &'static str {
@@ -66,13 +119,16 @@ async fn connect_and_stream(tx: &TickerSender, ob_tx: &OrderBookSender, tracker:
     info!("[Bybit] connected");
     let (mut write, mut read) = ws_stream.split();
 
+    // Spot only supports depths: 1, 50, 200, 1000. Use 50 and take top 5.
     let args: Vec<String> = ALL_SYMBOLS
         .iter()
-        .map(|s| format!("orderbook.5.{}", symbol_to_pair(s)))
+        .map(|s| format!("orderbook.50.{}", symbol_to_pair(s)))
         .collect();
     let sub = serde_json::json!({"op": "subscribe", "args": args});
     write.send(Message::Text(sub.to_string())).await?;
-    info!("[Bybit] subscribed to orderbook.5");
+    info!("[Bybit] subscribed to orderbook.50");
+
+    let books: Arc<Mutex<HashMap<Symbol, LocalBook>>> = Arc::new(Mutex::new(HashMap::new()));
 
     let ping_interval = tokio::time::interval(std::time::Duration::from_secs(20));
     tokio::pin!(ping_interval);
@@ -88,7 +144,7 @@ async fn connect_and_stream(tx: &TickerSender, ob_tx: &OrderBookSender, tracker:
                                 let rtt = sent.elapsed().as_secs_f64() * 1000.0;
                                 tracker.record(Exchange::Bybit, rtt);
                             }
-                        } else if let Err(e) = handle_message(&text, tx, ob_tx) {
+                        } else if let Err(e) = handle_message(&text, tx, ob_tx, &books) {
                             warn!("[Bybit] parse error: {e}");
                         }
                     }
@@ -126,16 +182,12 @@ async fn connect_and_stream(tx: &TickerSender, ob_tx: &OrderBookSender, tracker:
     Ok(())
 }
 
-fn parse_levels(raw: &[[String; 2]], limit: usize) -> Vec<PriceLevel> {
-    raw.iter().take(limit).filter_map(|l| {
-        Some(PriceLevel {
-            price: Decimal::from_str(&l[0]).ok()?,
-            qty: Decimal::from_str(&l[1]).ok()?,
-        })
-    }).collect()
-}
-
-fn handle_message(text: &str, tx: &TickerSender, ob_tx: &OrderBookSender) -> Result<()> {
+fn handle_message(
+    text: &str,
+    tx: &TickerSender,
+    ob_tx: &OrderBookSender,
+    books: &Arc<Mutex<HashMap<Symbol, LocalBook>>>,
+) -> Result<()> {
     let resp: WsResponse = serde_json::from_str(text)?;
 
     let topic = match resp.topic {
@@ -148,33 +200,45 @@ fn handle_message(text: &str, tx: &TickerSender, ob_tx: &OrderBookSender) -> Res
 
     let data = resp.data.ok_or_else(|| anyhow::anyhow!("missing data"))?;
     let symbol = pair_to_symbol(&data.s).ok_or_else(|| anyhow::anyhow!("unknown: {}", data.s))?;
+    let msg_type = resp.msg_type.unwrap_or_default();
 
-    if data.b.is_empty() || data.a.is_empty() {
+    let mut books_guard = books.lock();
+    let book = books_guard.entry(symbol).or_insert_with(LocalBook::new);
+
+    match msg_type.as_str() {
+        "snapshot" => book.apply_snapshot(&data.b, &data.a),
+        "delta" => book.apply_delta(&data.b, &data.a),
+        _ => return Ok(()),
+    }
+
+    let top_bids = book.top_bids(5);
+    let top_asks = book.top_asks(5);
+    drop(books_guard);
+
+    if top_bids.is_empty() || top_asks.is_empty() {
         return Ok(());
     }
 
     let now = Utc::now();
 
-    // Emit ticker from best level
     let ticker = Ticker {
         exchange: Exchange::Bybit,
         symbol,
-        best_bid: Decimal::from_str(&data.b[0][0])?,
-        best_bid_qty: Decimal::from_str(&data.b[0][1])?,
-        best_ask: Decimal::from_str(&data.a[0][0])?,
-        best_ask_qty: Decimal::from_str(&data.a[0][1])?,
+        best_bid: top_bids[0].price,
+        best_bid_qty: top_bids[0].qty,
+        best_ask: top_asks[0].price,
+        best_ask_qty: top_asks[0].qty,
         quote_currency: QuoteCurrency::USDT,
         timestamp: now,
         local_timestamp: now,
     };
     let _ = tx.send(ticker);
 
-    // Emit full orderbook
     let _ = ob_tx.send(OrderBookUpdate {
         exchange: Exchange::Bybit,
         symbol,
-        bids: parse_levels(&data.b, 5),
-        asks: parse_levels(&data.a, 5),
+        bids: top_bids,
+        asks: top_asks,
         quote_currency: QuoteCurrency::USDT,
         timestamp: now,
     });

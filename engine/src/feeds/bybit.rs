@@ -9,11 +9,11 @@ use std::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
 
-use crate::models::{Exchange, QuoteCurrency, Symbol, Ticker, ALL_SYMBOLS};
+use crate::models::{Exchange, OrderBookUpdate, PriceLevel, QuoteCurrency, Symbol, Ticker, ALL_SYMBOLS};
 
-use super::TickerSender;
 use super::connection::connect_ws;
 use super::latency::LatencyTracker;
+use super::{OrderBookSender, TickerSender};
 
 const WS_URL: &str = "wss://stream.bybit.com/v5/public/spot";
 
@@ -21,6 +21,7 @@ const WS_URL: &str = "wss://stream.bybit.com/v5/public/spot";
 struct WsResponse {
     topic: Option<String>,
     data: Option<OrderbookData>,
+    #[allow(dead_code)]
     op: Option<String>,
 }
 
@@ -50,16 +51,16 @@ fn pair_to_symbol(pair: &str) -> Option<Symbol> {
     }
 }
 
-pub async fn run(tx: TickerSender, tracker: Arc<LatencyTracker>) -> Result<()> {
+pub async fn run(tx: TickerSender, ob_tx: OrderBookSender, tracker: Arc<LatencyTracker>) -> Result<()> {
     loop {
-        if let Err(e) = connect_and_stream(&tx, &tracker).await {
+        if let Err(e) = connect_and_stream(&tx, &ob_tx, &tracker).await {
             error!("[Bybit] connection error: {e}, reconnecting in 3s...");
         }
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
 }
 
-async fn connect_and_stream(tx: &TickerSender, tracker: &LatencyTracker) -> Result<()> {
+async fn connect_and_stream(tx: &TickerSender, ob_tx: &OrderBookSender, tracker: &LatencyTracker) -> Result<()> {
     info!("[Bybit] connecting to {WS_URL}");
     let ws_stream = connect_ws(WS_URL).await?;
     info!("[Bybit] connected");
@@ -67,11 +68,11 @@ async fn connect_and_stream(tx: &TickerSender, tracker: &LatencyTracker) -> Resu
 
     let args: Vec<String> = ALL_SYMBOLS
         .iter()
-        .map(|s| format!("orderbook.1.{}", symbol_to_pair(s)))
+        .map(|s| format!("orderbook.5.{}", symbol_to_pair(s)))
         .collect();
     let sub = serde_json::json!({"op": "subscribe", "args": args});
     write.send(Message::Text(sub.to_string())).await?;
-    info!("[Bybit] subscribed to orderbook");
+    info!("[Bybit] subscribed to orderbook.5");
 
     let ping_interval = tokio::time::interval(std::time::Duration::from_secs(20));
     tokio::pin!(ping_interval);
@@ -82,13 +83,12 @@ async fn connect_and_stream(tx: &TickerSender, tracker: &LatencyTracker) -> Resu
             msg = read.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        // Bybit pong comes as JSON: {"op":"pong", ...}
                         if text.contains("\"pong\"") {
                             if let Some(sent) = ping_sent_at.take() {
                                 let rtt = sent.elapsed().as_secs_f64() * 1000.0;
                                 tracker.record(Exchange::Bybit, rtt);
                             }
-                        } else if let Err(e) = handle_message(&text, tx) {
+                        } else if let Err(e) = handle_message(&text, tx, ob_tx) {
                             warn!("[Bybit] parse error: {e}");
                         }
                     }
@@ -126,7 +126,16 @@ async fn connect_and_stream(tx: &TickerSender, tracker: &LatencyTracker) -> Resu
     Ok(())
 }
 
-fn handle_message(text: &str, tx: &TickerSender) -> Result<()> {
+fn parse_levels(raw: &[[String; 2]], limit: usize) -> Vec<PriceLevel> {
+    raw.iter().take(limit).filter_map(|l| {
+        Some(PriceLevel {
+            price: Decimal::from_str(&l[0]).ok()?,
+            qty: Decimal::from_str(&l[1]).ok()?,
+        })
+    }).collect()
+}
+
+fn handle_message(text: &str, tx: &TickerSender, ob_tx: &OrderBookSender) -> Result<()> {
     let resp: WsResponse = serde_json::from_str(text)?;
 
     let topic = match resp.topic {
@@ -145,6 +154,8 @@ fn handle_message(text: &str, tx: &TickerSender) -> Result<()> {
     }
 
     let now = Utc::now();
+
+    // Emit ticker from best level
     let ticker = Ticker {
         exchange: Exchange::Bybit,
         symbol,
@@ -157,5 +168,16 @@ fn handle_message(text: &str, tx: &TickerSender) -> Result<()> {
         local_timestamp: now,
     };
     let _ = tx.send(ticker);
+
+    // Emit full orderbook
+    let _ = ob_tx.send(OrderBookUpdate {
+        exchange: Exchange::Bybit,
+        symbol,
+        bids: parse_levels(&data.b, 5),
+        asks: parse_levels(&data.a, 5),
+        quote_currency: QuoteCurrency::USDT,
+        timestamp: now,
+    });
+
     Ok(())
 }

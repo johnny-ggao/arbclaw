@@ -3,17 +3,18 @@ use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
 
-use crate::models::{Exchange, QuoteCurrency, Symbol, Ticker, ALL_SYMBOLS};
+use crate::models::{Exchange, OrderBookUpdate, PriceLevel, QuoteCurrency, Symbol, Ticker, ALL_SYMBOLS};
 
-use super::TickerSender;
 use super::connection::connect_ws;
 use super::latency::LatencyTracker;
+use super::{OrderBookSender, TickerSender};
 
 const WS_URL: &str = "wss://pubwss.bithumb.com/pub/ws";
 
@@ -59,16 +60,55 @@ fn pair_to_symbol(pair: &str) -> Option<Symbol> {
     }
 }
 
-pub async fn run(tx: TickerSender, tracker: Arc<LatencyTracker>) -> Result<()> {
+// Local orderbook maintained per symbol
+struct LocalBook {
+    bids: BTreeMap<Decimal, Decimal>, // price → qty, descending iteration
+    asks: BTreeMap<Decimal, Decimal>, // price → qty, ascending iteration
+}
+
+impl LocalBook {
+    fn new() -> Self {
+        Self {
+            bids: BTreeMap::new(),
+            asks: BTreeMap::new(),
+        }
+    }
+
+    fn update_bid(&mut self, price: Decimal, qty: Decimal) {
+        if qty.is_zero() {
+            self.bids.remove(&price);
+        } else {
+            self.bids.insert(price, qty);
+        }
+    }
+
+    fn update_ask(&mut self, price: Decimal, qty: Decimal) {
+        if qty.is_zero() {
+            self.asks.remove(&price);
+        } else {
+            self.asks.insert(price, qty);
+        }
+    }
+
+    fn top_bids(&self, n: usize) -> Vec<PriceLevel> {
+        self.bids.iter().rev().take(n).map(|(p, q)| PriceLevel { price: *p, qty: *q }).collect()
+    }
+
+    fn top_asks(&self, n: usize) -> Vec<PriceLevel> {
+        self.asks.iter().take(n).map(|(p, q)| PriceLevel { price: *p, qty: *q }).collect()
+    }
+}
+
+pub async fn run(tx: TickerSender, ob_tx: OrderBookSender, tracker: Arc<LatencyTracker>) -> Result<()> {
     loop {
-        if let Err(e) = connect_and_stream(&tx, &tracker).await {
+        if let Err(e) = connect_and_stream(&tx, &ob_tx, &tracker).await {
             error!("[Bithumb] connection error: {e}, reconnecting in 3s...");
         }
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
 }
 
-async fn connect_and_stream(tx: &TickerSender, tracker: &LatencyTracker) -> Result<()> {
+async fn connect_and_stream(tx: &TickerSender, ob_tx: &OrderBookSender, tracker: &LatencyTracker) -> Result<()> {
     info!("[Bithumb] connecting to {WS_URL}");
     let ws_stream = connect_ws(WS_URL).await?;
     info!("[Bithumb] connected");
@@ -79,6 +119,8 @@ async fn connect_and_stream(tx: &TickerSender, tracker: &LatencyTracker) -> Resu
     write.send(Message::Text(sub.to_string())).await?;
     info!("[Bithumb] subscribed to orderbookdepth");
 
+    let mut books: std::collections::HashMap<String, LocalBook> = std::collections::HashMap::new();
+
     let ping_interval = tokio::time::interval(std::time::Duration::from_secs(30));
     tokio::pin!(ping_interval);
     let mut ping_sent_at: Option<Instant> = None;
@@ -88,7 +130,7 @@ async fn connect_and_stream(tx: &TickerSender, tracker: &LatencyTracker) -> Resu
             msg = read.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if let Err(e) = handle_message(&text, tx) {
+                        if let Err(e) = handle_message(&text, tx, ob_tx, &mut books) {
                             warn!("[Bithumb] parse error: {e}");
                         }
                     }
@@ -125,7 +167,12 @@ async fn connect_and_stream(tx: &TickerSender, tracker: &LatencyTracker) -> Resu
     Ok(())
 }
 
-fn handle_message(text: &str, tx: &TickerSender) -> Result<()> {
+fn handle_message(
+    text: &str,
+    tx: &TickerSender,
+    ob_tx: &OrderBookSender,
+    books: &mut std::collections::HashMap<String, LocalBook>,
+) -> Result<()> {
     let resp: WsResponse = serde_json::from_str(text)?;
 
     if resp.status.is_some() {
@@ -141,47 +188,64 @@ fn handle_message(text: &str, tx: &TickerSender) -> Result<()> {
 
     let content = resp.content.ok_or_else(|| anyhow::anyhow!("missing content"))?;
 
-    use std::collections::HashMap;
-    let mut bids: HashMap<String, (Decimal, Decimal)> = HashMap::new();
-    let mut asks: HashMap<String, (Decimal, Decimal)> = HashMap::new();
+    // Collect which symbols were updated
+    let mut updated_symbols: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for entry in &content.list {
         let price = Decimal::from_str(&entry.price)?;
         let qty = Decimal::from_str(&entry.quantity)?;
-        if qty.is_zero() {
-            continue;
-        }
+        let book = books.entry(entry.symbol.clone()).or_insert_with(LocalBook::new);
+
         match entry.order_type.as_str() {
-            "bid" => {
-                let e = bids.entry(entry.symbol.clone()).or_insert((Decimal::ZERO, Decimal::ZERO));
-                if price > e.0 { *e = (price, qty); }
-            }
-            "ask" => {
-                let e = asks.entry(entry.symbol.clone()).or_insert((Decimal::MAX, Decimal::ZERO));
-                if price < e.0 { *e = (price, qty); }
-            }
-            _ => {}
+            "bid" => book.update_bid(price, qty),
+            "ask" => book.update_ask(price, qty),
+            _ => continue,
         }
+        updated_symbols.insert(entry.symbol.clone());
     }
 
     let now = Utc::now();
-    for (sym_str, (bid_price, bid_qty)) in &bids {
-        if let Some((ask_price, ask_qty)) = asks.get(sym_str) {
-            if let Some(symbol) = pair_to_symbol(sym_str) {
-                let ticker = Ticker {
-                    exchange: Exchange::Bithumb,
-                    symbol,
-                    best_bid: *bid_price,
-                    best_bid_qty: *bid_qty,
-                    best_ask: *ask_price,
-                    best_ask_qty: *ask_qty,
-                    quote_currency: QuoteCurrency::KRW,
-                    timestamp: now,
-                    local_timestamp: now,
-                };
-                let _ = tx.send(ticker);
-            }
+    for sym_str in &updated_symbols {
+        let symbol = match pair_to_symbol(sym_str) {
+            Some(s) => s,
+            None => continue,
+        };
+        let book = match books.get(sym_str) {
+            Some(b) => b,
+            None => continue,
+        };
+
+        let top_bids = book.top_bids(5);
+        let top_asks = book.top_asks(5);
+
+        if top_bids.is_empty() || top_asks.is_empty() {
+            continue;
         }
+
+        // Emit ticker from best level
+        let ticker = Ticker {
+            exchange: Exchange::Bithumb,
+            symbol,
+            best_bid: top_bids[0].price,
+            best_bid_qty: top_bids[0].qty,
+            best_ask: top_asks[0].price,
+            best_ask_qty: top_asks[0].qty,
+            quote_currency: QuoteCurrency::KRW,
+            timestamp: now,
+            local_timestamp: now,
+        };
+        let _ = tx.send(ticker);
+
+        // Emit orderbook
+        let _ = ob_tx.send(OrderBookUpdate {
+            exchange: Exchange::Bithumb,
+            symbol,
+            bids: top_bids,
+            asks: top_asks,
+            quote_currency: QuoteCurrency::KRW,
+            timestamp: now,
+        });
     }
+
     Ok(())
 }

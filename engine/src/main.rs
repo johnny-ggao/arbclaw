@@ -11,7 +11,7 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use feeds::latency::LatencyTracker;
-use models::{ExchangeLatency, LatencyReport, Ticker, WsMessage};
+use models::{ExchangeLatency, LatencyReport, OrderBookUpdate, Ticker, WsMessage};
 use normalizer::{Normalizer, RateManager};
 use store::DataStore;
 use strategy::ArbitrageEngine;
@@ -34,6 +34,7 @@ async fn main() {
     info!("CEX Arbitrage Engine starting...");
 
     let (ticker_tx, _) = broadcast::channel::<Ticker>(4096);
+    let (ob_tx, _) = broadcast::channel::<OrderBookUpdate>(2048);
 
     let rate_manager = Arc::new(RateManager::new());
     let normalizer = Arc::new(Normalizer::new(rate_manager.clone()));
@@ -50,19 +51,44 @@ async fn main() {
         ws_server.run(WS_PORT, store_clone, latency_clone).await;
     });
 
+    // Spawn feeds
     let tx = ticker_tx.clone();
+    let ob = ob_tx.clone();
     let lt = latency_tracker.clone();
     let rm = rate_manager.clone();
-    tokio::spawn(async move { feeds::binance::run(tx, lt, rm).await });
+    tokio::spawn(async move { feeds::binance::run(tx, ob, lt, rm).await });
+
     let tx = ticker_tx.clone();
+    let ob = ob_tx.clone();
     let lt = latency_tracker.clone();
-    tokio::spawn(async move { feeds::bybit::run(tx, lt).await });
+    tokio::spawn(async move { feeds::bybit::run(tx, ob, lt).await });
+
     let tx = ticker_tx.clone();
+    let ob = ob_tx.clone();
     let lt = latency_tracker.clone();
-    tokio::spawn(async move { feeds::upbit::run(tx, lt).await });
+    tokio::spawn(async move { feeds::upbit::run(tx, ob, lt).await });
+
     let tx = ticker_tx.clone();
+    let ob = ob_tx.clone();
     let lt = latency_tracker.clone();
-    tokio::spawn(async move { feeds::bithumb::run(tx, lt).await });
+    tokio::spawn(async move { feeds::bithumb::run(tx, ob, lt).await });
+
+    // Spawn orderbook forwarder (broadcasts to WS clients)
+    let ws_bc_ob = ws_broadcast.clone();
+    let mut ob_rx = ob_tx.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match ob_rx.recv().await {
+                Ok(ob) => {
+                    broadcast_message(&ws_bc_ob, &WsMessage::OrderBook(ob));
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("orderbook forwarder lagged by {n}");
+                }
+                Err(_) => break,
+            }
+        }
+    });
 
     let mut ticker_rx = ticker_tx.subscribe();
     let mut signal_count: u64 = 0;
@@ -117,9 +143,7 @@ async fn main() {
                     );
                 }
 
-                // Store ticker snapshot (with downsampling)
                 data_store.push_ticker(&normalized);
-
                 broadcast_message(&ws_broadcast, &WsMessage::Ticker(normalized.clone()));
 
                 if ticker.symbol == models::Symbol::BTC && tick_count % 100 == 0 {
@@ -129,7 +153,6 @@ async fn main() {
                     }
                 }
 
-                // Broadcast latency every ~500 ticks
                 if tick_count % 500 == 0 {
                     let snapshots = latency_tracker.snapshots();
                     let report = LatencyReport {

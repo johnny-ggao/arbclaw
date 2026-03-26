@@ -9,12 +9,12 @@ use std::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
 
-use crate::models::{Exchange, QuoteCurrency, Symbol, Ticker, ALL_SYMBOLS};
+use crate::models::{Exchange, OrderBookUpdate, PriceLevel, QuoteCurrency, Symbol, Ticker, ALL_SYMBOLS};
 use crate::normalizer::RateManager;
 
-use super::TickerSender;
 use super::connection::connect_ws;
 use super::latency::LatencyTracker;
+use super::{OrderBookSender, TickerSender};
 
 const WS_URL: &str = "wss://stream.binance.com:9443/ws";
 
@@ -27,6 +27,14 @@ struct BookTicker {
     a: String,
     #[serde(rename = "A")]
     aq: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DepthSnapshot {
+    #[serde(rename = "lastUpdateId")]
+    _last_update_id: Option<u64>,
+    bids: Vec<[String; 2]>,
+    asks: Vec<[String; 2]>,
 }
 
 fn symbol_to_pair(s: &Symbol) -> &'static str {
@@ -48,19 +56,41 @@ fn pair_to_symbol(pair: &str) -> Option<Symbol> {
     }
 }
 
-pub async fn run(tx: TickerSender, tracker: Arc<LatencyTracker>, rate_mgr: Arc<RateManager>) -> Result<()> {
+fn stream_to_symbol(stream: &str) -> Option<Symbol> {
+    // "btcusdt@depth5@100ms" → "BTCUSDT"
+    let pair = stream.split('@').next()?;
+    pair_to_symbol(pair)
+}
+
+pub async fn run(
+    tx: TickerSender,
+    ob_tx: OrderBookSender,
+    tracker: Arc<LatencyTracker>,
+    rate_mgr: Arc<RateManager>,
+) -> Result<()> {
     loop {
-        if let Err(e) = connect_and_stream(&tx, &tracker, &rate_mgr).await {
+        if let Err(e) = connect_and_stream(&tx, &ob_tx, &tracker, &rate_mgr).await {
             error!("[Binance] connection error: {e}, reconnecting in 3s...");
         }
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
 }
 
-async fn connect_and_stream(tx: &TickerSender, tracker: &LatencyTracker, rate_mgr: &RateManager) -> Result<()> {
+async fn connect_and_stream(
+    tx: &TickerSender,
+    ob_tx: &OrderBookSender,
+    tracker: &LatencyTracker,
+    rate_mgr: &RateManager,
+) -> Result<()> {
     let mut streams: Vec<String> = ALL_SYMBOLS
         .iter()
-        .map(|s| format!("{}@bookTicker", symbol_to_pair(s)))
+        .flat_map(|s| {
+            let p = symbol_to_pair(s);
+            vec![
+                format!("{p}@bookTicker"),
+                format!("{p}@depth5@100ms"),
+            ]
+        })
         .collect();
     streams.push("usdcusdt@bookTicker".to_string());
     let url = format!("{}/{}", WS_URL, streams.join("/"));
@@ -79,7 +109,7 @@ async fn connect_and_stream(tx: &TickerSender, tracker: &LatencyTracker, rate_mg
             msg = read.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if let Err(e) = handle_message(&text, tx, rate_mgr) {
+                        if let Err(e) = handle_message(&text, tx, ob_tx, rate_mgr) {
                             warn!("[Binance] parse error: {e}");
                         }
                     }
@@ -115,16 +145,68 @@ async fn connect_and_stream(tx: &TickerSender, tracker: &LatencyTracker, rate_mg
     Ok(())
 }
 
-fn handle_message(text: &str, tx: &TickerSender, rate_mgr: &RateManager) -> Result<()> {
-    let bt: BookTicker = serde_json::from_str(text)?;
+// Combined stream messages come wrapped: {"stream":"...","data":{...}}
+#[derive(Debug, Deserialize)]
+struct CombinedMsg {
+    stream: Option<String>,
+    data: Option<serde_json::Value>,
+    // bookTicker fields (when not combined)
+    s: Option<String>,
+}
 
-    // USDC/USDT pair → derive USDT/USD rate (USDC ≈ 1 USD)
+fn handle_message(
+    text: &str,
+    tx: &TickerSender,
+    ob_tx: &OrderBookSender,
+    rate_mgr: &RateManager,
+) -> Result<()> {
+    // Combined stream format: check if it has "stream" field
+    let v: serde_json::Value = serde_json::from_str(text)?;
+
+    if v.get("stream").is_some() {
+        let stream = v["stream"].as_str().unwrap_or("");
+        let data = &v["data"];
+
+        if stream.contains("@depth5") {
+            // Depth snapshot
+            let snap: DepthSnapshot = serde_json::from_value(data.clone())?;
+            if let Some(symbol) = stream_to_symbol(stream) {
+                let bids: Vec<PriceLevel> = snap.bids.iter().take(5).filter_map(|l| {
+                    Some(PriceLevel { price: Decimal::from_str(&l[0]).ok()?, qty: Decimal::from_str(&l[1]).ok()? })
+                }).collect();
+                let asks: Vec<PriceLevel> = snap.asks.iter().take(5).filter_map(|l| {
+                    Some(PriceLevel { price: Decimal::from_str(&l[0]).ok()?, qty: Decimal::from_str(&l[1]).ok()? })
+                }).collect();
+                let _ = ob_tx.send(OrderBookUpdate {
+                    exchange: Exchange::Binance,
+                    symbol,
+                    bids,
+                    asks,
+                    quote_currency: QuoteCurrency::USDT,
+                    timestamp: Utc::now(),
+                });
+            }
+            return Ok(());
+        }
+
+        if stream.contains("@bookTicker") {
+            let bt: BookTicker = serde_json::from_value(data.clone())?;
+            return handle_book_ticker(&bt, tx, rate_mgr);
+        }
+
+        return Ok(());
+    }
+
+    // Non-combined format (shouldn't happen with combined streams, but fallback)
+    let bt: BookTicker = serde_json::from_str(text)?;
+    handle_book_ticker(&bt, tx, rate_mgr)
+}
+
+fn handle_book_ticker(bt: &BookTicker, tx: &TickerSender, rate_mgr: &RateManager) -> Result<()> {
     if bt.s.to_uppercase() == "USDCUSDT" {
         let bid = Decimal::from_str(&bt.b)?;
         let ask = Decimal::from_str(&bt.a)?;
         let mid = (bid + ask) / Decimal::TWO;
-        // mid = how many USDT per 1 USDC (≈1 USD)
-        // so USDT/USD = 1/mid (how many USD per 1 USDT)
         if !mid.is_zero() {
             rate_mgr.update_usdt_usd_rate(Decimal::ONE / mid);
         }
@@ -133,7 +215,6 @@ fn handle_message(text: &str, tx: &TickerSender, rate_mgr: &RateManager) -> Resu
 
     let symbol = pair_to_symbol(&bt.s).ok_or_else(|| anyhow::anyhow!("unknown pair: {}", bt.s))?;
     let now = Utc::now();
-
     let ticker = Ticker {
         exchange: Exchange::Binance,
         symbol,

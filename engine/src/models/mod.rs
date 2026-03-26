@@ -146,6 +146,23 @@ pub struct ExchangeLatency {
     pub samples: usize,
 }
 
+// Order book depth (up to 5 levels)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PriceLevel {
+    pub price: Decimal,
+    pub qty: Decimal,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrderBookUpdate {
+    pub exchange: Exchange,
+    pub symbol: Symbol,
+    pub bids: Vec<PriceLevel>, // sorted high→low
+    pub asks: Vec<PriceLevel>, // sorted low→high
+    pub quote_currency: QuoteCurrency,
+    pub timestamp: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum WsMessage {
@@ -159,4 +176,6 @@ pub enum WsMessage {
     Status(FeedStatus),
     #[serde(rename = "latency")]
     Latency(LatencyReport),
+    #[serde(rename = "orderbook")]
+    OrderBook(OrderBookUpdate),
 }

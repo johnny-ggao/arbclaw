@@ -11,7 +11,15 @@ import type {
   ExchangeRate,
   ExchangeLatencyInfo,
   LatencyReport,
+  OrderBookUpdate,
 } from "@/app/lib/types";
+
+export interface OrderBookState {
+  bids: { price: number; qty: number }[];
+  asks: { price: number; qty: number }[];
+  quote_currency: "USDT" | "KRW";
+  updatedAt: number;
+}
 
 function getWsUrl(): string {
   if (typeof window === "undefined") return "ws://localhost/ws";
@@ -31,6 +39,7 @@ export interface DashboardState {
   signals: SignalRecord[];
   rate: { krw_per_usdt: number; usdt_per_usd: number; krw_per_usd: number; source: string } | null;
   latency: ExchangeLatencyInfo[];
+  orderbooks: Record<string, OrderBookState>;
   connected: boolean;
   tickCount: number;
 }
@@ -45,6 +54,7 @@ export function useWebSocket(): DashboardState {
     signals: [],
     rate: null,
     latency: [],
+    orderbooks: {},
     connected: false,
     tickCount: 0,
   });
@@ -58,6 +68,7 @@ export function useWebSocket(): DashboardState {
   const pendingSignalsRef = useRef<SignalRecord[]>([]);
   const pendingRateRef = useRef<{ krw_per_usdt: number; usdt_per_usd: number; krw_per_usd: number; source: string } | null>(null);
   const pendingLatencyRef = useRef<ExchangeLatencyInfo[] | null>(null);
+  const pendingOBRef = useRef<Record<string, OrderBookState>>({});
   const tickAccRef = useRef(0);
 
   // Fetch initial snapshot from backend on mount
@@ -129,13 +140,16 @@ export function useWebSocket(): DashboardState {
       const pendingSignals = pendingSignalsRef.current;
       const pendingRate = pendingRateRef.current;
       const pendingLatency = pendingLatencyRef.current;
+      const pendingOB = pendingOBRef.current;
       const ticks = tickAccRef.current;
+      const hasOB = Object.keys(pendingOB).length > 0;
 
       if (
         Object.keys(pending).length === 0 &&
         pendingSignals.length === 0 &&
         !pendingRate &&
         !pendingLatency &&
+        !hasOB &&
         ticks === 0
       )
         return;
@@ -144,6 +158,7 @@ export function useWebSocket(): DashboardState {
       pendingSignalsRef.current = [];
       pendingRateRef.current = null;
       pendingLatencyRef.current = null;
+      pendingOBRef.current = {};
       tickAccRef.current = 0;
 
       setState((prev) => {
@@ -158,6 +173,7 @@ export function useWebSocket(): DashboardState {
           signals: newSignals,
           rate: pendingRate || prev.rate,
           latency: pendingLatency || prev.latency,
+          orderbooks: hasOB ? { ...prev.orderbooks, ...pendingOB } : prev.orderbooks,
           tickCount: prev.tickCount + ticks,
         };
       });
@@ -210,6 +226,17 @@ export function useWebSocket(): DashboardState {
         case "latency": {
           const l = msg as LatencyReport;
           pendingLatencyRef.current = l.exchanges;
+          break;
+        }
+        case "orderbook": {
+          const ob = msg as OrderBookUpdate;
+          const key = `${ob.exchange}:${ob.symbol}`;
+          pendingOBRef.current[key] = {
+            bids: ob.bids.map(l => ({ price: parseFloat(l.price), qty: parseFloat(l.qty) })),
+            asks: ob.asks.map(l => ({ price: parseFloat(l.price), qty: parseFloat(l.qty) })),
+            quote_currency: ob.quote_currency,
+            updatedAt: Date.now(),
+          };
           break;
         }
       }

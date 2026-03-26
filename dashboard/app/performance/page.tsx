@@ -85,6 +85,9 @@ export default function PerformancePage() {
             <span className="px-2 sm:px-3 py-1 rounded" style={{ color: "var(--text-primary)", background: "var(--bg-card-hover)" }}>
               绩效
             </span>
+            <Link href="/orderbook" className="px-2 sm:px-3 py-1 rounded transition-colors" style={{ color: "var(--text-muted)" }}>
+              盘口
+            </Link>
           </nav>
         </div>
       </header>

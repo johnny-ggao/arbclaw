@@ -8,11 +8,11 @@ use std::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
 
-use crate::models::{Exchange, QuoteCurrency, Symbol, Ticker, ALL_SYMBOLS};
+use crate::models::{Exchange, OrderBookUpdate, PriceLevel, QuoteCurrency, Symbol, Ticker, ALL_SYMBOLS};
 
-use super::TickerSender;
 use super::connection::connect_ws;
 use super::latency::LatencyTracker;
+use super::{OrderBookSender, TickerSender};
 
 const WS_URL: &str = "wss://api.upbit.com/websocket/v1";
 
@@ -55,16 +55,16 @@ fn code_to_symbol(code: &str) -> Option<Symbol> {
     }
 }
 
-pub async fn run(tx: TickerSender, tracker: Arc<LatencyTracker>) -> Result<()> {
+pub async fn run(tx: TickerSender, ob_tx: OrderBookSender, tracker: Arc<LatencyTracker>) -> Result<()> {
     loop {
-        if let Err(e) = connect_and_stream(&tx, &tracker).await {
+        if let Err(e) = connect_and_stream(&tx, &ob_tx, &tracker).await {
             error!("[Upbit] connection error: {e}, reconnecting in 3s...");
         }
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
 }
 
-async fn connect_and_stream(tx: &TickerSender, tracker: &LatencyTracker) -> Result<()> {
+async fn connect_and_stream(tx: &TickerSender, ob_tx: &OrderBookSender, tracker: &LatencyTracker) -> Result<()> {
     info!("[Upbit] connecting to {WS_URL}");
     let ws_stream = connect_ws(WS_URL).await?;
     info!("[Upbit] connected");
@@ -87,14 +87,14 @@ async fn connect_and_stream(tx: &TickerSender, tracker: &LatencyTracker) -> Resu
             msg = read.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if let Err(e) = handle_message(&text, tx) {
+                        if let Err(e) = handle_message(&text, tx, ob_tx) {
                             warn!("[Upbit] text parse error: {e}");
                         }
                     }
                     Some(Ok(Message::Binary(data))) => {
                         match String::from_utf8(data.to_vec()) {
                             Ok(text) => {
-                                if let Err(e) = handle_message(&text, tx) {
+                                if let Err(e) = handle_message(&text, tx, ob_tx) {
                                     warn!("[Upbit] binary parse error: {e}");
                                 }
                             }
@@ -134,7 +134,7 @@ async fn connect_and_stream(tx: &TickerSender, tracker: &LatencyTracker) -> Resu
     Ok(())
 }
 
-fn handle_message(text: &str, tx: &TickerSender) -> Result<()> {
+fn handle_message(text: &str, tx: &TickerSender, ob_tx: &OrderBookSender) -> Result<()> {
     let resp: OrderbookResponse = serde_json::from_str(text)?;
 
     let code = resp.cd.or(resp.code).ok_or_else(|| anyhow::anyhow!("missing code field"))?;
@@ -147,9 +147,10 @@ fn handle_message(text: &str, tx: &TickerSender) -> Result<()> {
         return Ok(());
     }
 
-    let best = &units[0];
     let now = Utc::now();
 
+    // Emit ticker from best level
+    let best = &units[0];
     let ticker = Ticker {
         exchange: Exchange::Upbit,
         symbol,
@@ -162,5 +163,25 @@ fn handle_message(text: &str, tx: &TickerSender) -> Result<()> {
         local_timestamp: now,
     };
     let _ = tx.send(ticker);
+
+    // Emit orderbook (up to 5 levels)
+    let bids: Vec<PriceLevel> = units.iter().take(5).map(|u| PriceLevel {
+        price: u.bid_price,
+        qty: u.bid_size,
+    }).collect();
+    let asks: Vec<PriceLevel> = units.iter().take(5).map(|u| PriceLevel {
+        price: u.ask_price,
+        qty: u.ask_size,
+    }).collect();
+
+    let _ = ob_tx.send(OrderBookUpdate {
+        exchange: Exchange::Upbit,
+        symbol,
+        bids,
+        asks,
+        quote_currency: QuoteCurrency::KRW,
+        timestamp: now,
+    });
+
     Ok(())
 }

@@ -72,7 +72,22 @@ export interface ExchangeLatencyInfo {
   samples: number;
 }
 
-export type WsMessage = NormalizedTicker | ArbitrageSignal | ExchangeRate | FeedStatus | LatencyReport;
+export interface PriceLevel {
+  price: string;
+  qty: string;
+}
+
+export interface OrderBookUpdate {
+  type: "orderbook";
+  exchange: Exchange;
+  symbol: Symbol;
+  bids: PriceLevel[];
+  asks: PriceLevel[];
+  quote_currency: "USDT" | "KRW";
+  timestamp: string;
+}
+
+export type WsMessage = NormalizedTicker | ArbitrageSignal | ExchangeRate | FeedStatus | LatencyReport | OrderBookUpdate;
 
 export interface TickerState {
   best_bid_usd: number;

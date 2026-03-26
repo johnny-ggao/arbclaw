@@ -33,6 +33,9 @@ export default function StatusBar({ connected, tickCount, rate }: Props) {
             <Link href="/performance" className="px-2 sm:px-3 py-1 rounded transition-colors" style={{ color: "var(--text-muted)" }}>
               绩效
             </Link>
+            <Link href="/orderbook" className="px-2 sm:px-3 py-1 rounded transition-colors" style={{ color: "var(--text-muted)" }}>
+              盘口
+            </Link>
           </nav>
           <div
             className="flex items-center gap-1 px-1.5 py-0.5 rounded text-xs shrink-0"

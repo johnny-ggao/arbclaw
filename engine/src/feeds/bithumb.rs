@@ -3,7 +3,6 @@ use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use rust_decimal::Decimal;
 use serde::Deserialize;
-use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
@@ -16,87 +15,45 @@ use super::connection::connect_ws;
 use super::latency::LatencyTracker;
 use super::{OrderBookSender, TickerSender};
 
-const WS_URL: &str = "wss://pubwss.bithumb.com/pub/ws";
+const WS_URL: &str = "wss://ws-api.bithumb.com/websocket/v1";
 
+fn symbol_to_code(s: &Symbol) -> &'static str {
+    match s {
+        Symbol::BTC => "KRW-BTC",
+        Symbol::ETH => "KRW-ETH",
+        Symbol::SOL => "KRW-SOL",
+        Symbol::XRP => "KRW-XRP",
+    }
+}
+
+fn code_to_symbol(code: &str) -> Option<Symbol> {
+    match code {
+        "KRW-BTC" => Some(Symbol::BTC),
+        "KRW-ETH" => Some(Symbol::ETH),
+        "KRW-SOL" => Some(Symbol::SOL),
+        "KRW-XRP" => Some(Symbol::XRP),
+        _ => None,
+    }
+}
+
+// v2 orderbook response format
 #[derive(Debug, Deserialize)]
-struct WsResponse {
+struct OrderbookMsg {
     #[serde(rename = "type")]
     msg_type: Option<String>,
-    content: Option<OrderbookContent>,
+    code: Option<String>,
+    orderbook_units: Option<Vec<OrderbookUnit>>,
+    // v1 status fields
     status: Option<String>,
     resmsg: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
-struct OrderbookContent {
-    list: Vec<OrderEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct OrderEntry {
-    symbol: String,
-    #[serde(rename = "orderType")]
-    order_type: String,
-    price: String,
-    quantity: String,
-}
-
-fn symbol_to_pair(s: &Symbol) -> &'static str {
-    match s {
-        Symbol::BTC => "BTC_KRW",
-        Symbol::ETH => "ETH_KRW",
-        Symbol::SOL => "SOL_KRW",
-        Symbol::XRP => "XRP_KRW",
-    }
-}
-
-fn pair_to_symbol(pair: &str) -> Option<Symbol> {
-    match pair {
-        "BTC_KRW" => Some(Symbol::BTC),
-        "ETH_KRW" => Some(Symbol::ETH),
-        "SOL_KRW" => Some(Symbol::SOL),
-        "XRP_KRW" => Some(Symbol::XRP),
-        _ => None,
-    }
-}
-
-// Local orderbook maintained per symbol
-struct LocalBook {
-    bids: BTreeMap<Decimal, Decimal>, // price → qty, descending iteration
-    asks: BTreeMap<Decimal, Decimal>, // price → qty, ascending iteration
-}
-
-impl LocalBook {
-    fn new() -> Self {
-        Self {
-            bids: BTreeMap::new(),
-            asks: BTreeMap::new(),
-        }
-    }
-
-    fn update_bid(&mut self, price: Decimal, qty: Decimal) {
-        if qty.is_zero() {
-            self.bids.remove(&price);
-        } else {
-            self.bids.insert(price, qty);
-        }
-    }
-
-    fn update_ask(&mut self, price: Decimal, qty: Decimal) {
-        if qty.is_zero() {
-            self.asks.remove(&price);
-        } else {
-            self.asks.insert(price, qty);
-        }
-    }
-
-    fn top_bids(&self, n: usize) -> Vec<PriceLevel> {
-        self.bids.iter().rev().take(n).map(|(p, q)| PriceLevel { price: *p, qty: *q }).collect()
-    }
-
-    fn top_asks(&self, n: usize) -> Vec<PriceLevel> {
-        self.asks.iter().take(n).map(|(p, q)| PriceLevel { price: *p, qty: *q }).collect()
-    }
+struct OrderbookUnit {
+    ask_price: f64,
+    bid_price: f64,
+    ask_size: f64,
+    bid_size: f64,
 }
 
 pub async fn run(tx: TickerSender, ob_tx: OrderBookSender, tracker: Arc<LatencyTracker>) -> Result<()> {
@@ -114,12 +71,15 @@ async fn connect_and_stream(tx: &TickerSender, ob_tx: &OrderBookSender, tracker:
     info!("[Bithumb] connected");
     let (mut write, mut read) = ws_stream.split();
 
-    let symbols: Vec<String> = ALL_SYMBOLS.iter().map(|s| symbol_to_pair(s).to_string()).collect();
-    let sub = serde_json::json!({"type": "orderbookdepth", "symbols": symbols});
+    // v2 orderbook subscription: snapshot + realtime (both by default)
+    let codes: Vec<String> = ALL_SYMBOLS.iter().map(|s| symbol_to_code(s).to_string()).collect();
+    let sub = serde_json::json!([
+        {"ticket": "arbclaw"},
+        {"type": "orderbook", "codes": codes},
+        {"format": "DEFAULT"}
+    ]);
     write.send(Message::Text(sub.to_string())).await?;
-    info!("[Bithumb] subscribed to orderbookdepth");
-
-    let mut books: std::collections::HashMap<String, LocalBook> = std::collections::HashMap::new();
+    info!("[Bithumb] subscribed to v2 orderbook");
 
     let ping_interval = tokio::time::interval(std::time::Duration::from_secs(30));
     tokio::pin!(ping_interval);
@@ -130,7 +90,19 @@ async fn connect_and_stream(tx: &TickerSender, ob_tx: &OrderBookSender, tracker:
             msg = read.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if let Err(e) = handle_message(&text, tx, ob_tx, &mut books) {
+                        if let Err(e) = handle_message(&text, tx, ob_tx) {
+                            warn!("[Bithumb] parse error: {e}");
+                        }
+                    }
+                    Some(Ok(Message::Binary(data))) => {
+                        let text = match String::from_utf8(data.to_vec()) {
+                            Ok(s) => s,
+                            Err(_) => {
+                                warn!("[Bithumb] non-UTF8 binary: {}B", data.len());
+                                continue;
+                            }
+                        };
+                        if let Err(e) = handle_message(&text, tx, ob_tx) {
                             warn!("[Bithumb] parse error: {e}");
                         }
                     }
@@ -167,85 +139,76 @@ async fn connect_and_stream(tx: &TickerSender, ob_tx: &OrderBookSender, tracker:
     Ok(())
 }
 
-fn handle_message(
-    text: &str,
-    tx: &TickerSender,
-    ob_tx: &OrderBookSender,
-    books: &mut std::collections::HashMap<String, LocalBook>,
-) -> Result<()> {
-    let resp: WsResponse = serde_json::from_str(text)?;
+fn handle_message(text: &str, tx: &TickerSender, ob_tx: &OrderBookSender) -> Result<()> {
+    let msg: OrderbookMsg = serde_json::from_str(text)?;
 
-    if resp.status.is_some() {
-        let status = resp.status.as_deref().unwrap_or("");
-        let msg = resp.resmsg.as_deref().unwrap_or("");
-        info!("[Bithumb] status: {status} - {msg}");
+    // Handle v1 status messages (connection ack)
+    if let Some(status) = &msg.status {
+        let resmsg = msg.resmsg.as_deref().unwrap_or("");
+        info!("[Bithumb] status: {status} - {resmsg}");
         return Ok(());
     }
 
-    if resp.msg_type.as_deref() != Some("orderbookdepth") {
+    if msg.msg_type.as_deref() != Some("orderbook") {
         return Ok(());
     }
 
-    let content = resp.content.ok_or_else(|| anyhow::anyhow!("missing content"))?;
+    let code = msg.code.as_deref().ok_or_else(|| anyhow::anyhow!("missing code"))?;
+    let symbol = code_to_symbol(code).ok_or_else(|| anyhow::anyhow!("unknown code: {code}"))?;
+    let units = msg.orderbook_units.ok_or_else(|| anyhow::anyhow!("missing orderbook_units"))?;
 
-    // Collect which symbols were updated
-    let mut updated_symbols: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if units.is_empty() {
+        return Ok(());
+    }
 
-    for entry in &content.list {
-        let price = Decimal::from_str(&entry.price)?;
-        let qty = Decimal::from_str(&entry.quantity)?;
-        let book = books.entry(entry.symbol.clone()).or_insert_with(LocalBook::new);
+    // Each message is a full snapshot: units are sorted by proximity to mid price
+    // units[0] has best bid and best ask
+    let mut asks: Vec<PriceLevel> = Vec::new();
+    let mut bids: Vec<PriceLevel> = Vec::new();
 
-        match entry.order_type.as_str() {
-            "bid" => book.update_bid(price, qty),
-            "ask" => book.update_ask(price, qty),
-            _ => continue,
+    for u in units.iter().take(5) {
+        if u.ask_price > 0.0 && u.ask_size > 0.0 {
+            asks.push(PriceLevel {
+                price: Decimal::from_str(&format!("{:.0}", u.ask_price))?,
+                qty: Decimal::from_str(&format!("{:.8}", u.ask_size))?,
+            });
         }
-        updated_symbols.insert(entry.symbol.clone());
+        if u.bid_price > 0.0 && u.bid_size > 0.0 {
+            bids.push(PriceLevel {
+                price: Decimal::from_str(&format!("{:.0}", u.bid_price))?,
+                qty: Decimal::from_str(&format!("{:.8}", u.bid_size))?,
+            });
+        }
+    }
+
+    if bids.is_empty() || asks.is_empty() {
+        return Ok(());
     }
 
     let now = Utc::now();
-    for sym_str in &updated_symbols {
-        let symbol = match pair_to_symbol(sym_str) {
-            Some(s) => s,
-            None => continue,
-        };
-        let book = match books.get(sym_str) {
-            Some(b) => b,
-            None => continue,
-        };
 
-        let top_bids = book.top_bids(5);
-        let top_asks = book.top_asks(5);
+    // Emit ticker from best level (index 0)
+    let _ = tx.send(Ticker {
+        exchange: Exchange::Bithumb,
+        symbol,
+        best_bid: bids[0].price,
+        best_bid_qty: bids[0].qty,
+        best_ask: asks[0].price,
+        best_ask_qty: asks[0].qty,
+        quote_currency: QuoteCurrency::KRW,
+        timestamp: now,
+        local_timestamp: now,
+    });
 
-        if top_bids.is_empty() || top_asks.is_empty() {
-            continue;
-        }
-
-        // Emit ticker from best level
-        let ticker = Ticker {
-            exchange: Exchange::Bithumb,
-            symbol,
-            best_bid: top_bids[0].price,
-            best_bid_qty: top_bids[0].qty,
-            best_ask: top_asks[0].price,
-            best_ask_qty: top_asks[0].qty,
-            quote_currency: QuoteCurrency::KRW,
-            timestamp: now,
-            local_timestamp: now,
-        };
-        let _ = tx.send(ticker);
-
-        // Emit orderbook
-        let _ = ob_tx.send(OrderBookUpdate {
-            exchange: Exchange::Bithumb,
-            symbol,
-            bids: top_bids,
-            asks: top_asks,
-            quote_currency: QuoteCurrency::KRW,
-            timestamp: now,
-        });
-    }
+    // Emit orderbook (asks sorted low→high, bids sorted high→low — already in correct order)
+    let _ = ob_tx.send(OrderBookUpdate {
+        exchange: Exchange::Bithumb,
+        symbol,
+        bids,
+        asks,
+        quote_currency: QuoteCurrency::KRW,
+        timestamp: now,
+    });
 
     Ok(())
 }

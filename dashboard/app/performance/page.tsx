@@ -20,7 +20,7 @@ function fmtNum(n: number, d: number = 2): string {
 }
 
 export default function PerformancePage() {
-  const [period, setPeriod] = useState<PeriodKey>("24h");
+  const [period, setPeriod] = useState<PeriodKey>("all");
   const [data, setData] = useState<PerformanceStats | null>(null);
   const [loading, setLoading] = useState(true);
 

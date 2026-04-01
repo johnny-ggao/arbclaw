@@ -40,6 +40,13 @@ async fn main() {
     let normalizer = Arc::new(Normalizer::new(rate_manager.clone()));
     let arb_engine = Arc::new(ArbitrageEngine::new());
     let data_store = Arc::new(DataStore::new());
+    // Try multiple paths for seed data
+    for path in &["data/opportunities.json", "../data/opportunities.json"] {
+        if std::path::Path::new(path).exists() {
+            data_store.load_seed_signals(path);
+            break;
+        }
+    }
     let latency_tracker = Arc::new(LatencyTracker::new());
 
     let ws_server = WsServer::new();

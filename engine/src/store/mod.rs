@@ -1,9 +1,9 @@
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::RwLock;
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
+use tracing::{info, warn};
 
 use crate::feeds::latency::LatencySnapshot;
 use crate::models::{ArbitrageSignal, Exchange, ExchangeRate, NormalizedTicker, Symbol};
@@ -114,6 +114,25 @@ pub struct DataStore {
     latest_rate: RwLock<Option<RateEntry>>,
 }
 
+// Seed data format (from kp.4pass.com.tw /api/opportunities)
+#[derive(Deserialize)]
+struct SeedFile {
+    data: Vec<SeedRecord>,
+}
+
+#[derive(Deserialize)]
+struct SeedRecord {
+    timestamp: String,
+    coin: String,
+    sell_exchange: String,
+    buy_exchange: String,
+    premium_pct: f64,
+    sell_bid_usdt: f64,
+    buy_ask_usdt: f64,
+    est_qty: f64,
+    est_profit_usdt: f64,
+}
+
 impl DataStore {
     pub fn new() -> Self {
         Self {
@@ -124,6 +143,48 @@ impl DataStore {
             rates: RwLock::new(VecDeque::with_capacity(MAX_RATES)),
             latest_rate: RwLock::new(None),
         }
+    }
+
+    pub fn load_seed_signals(&self, path: &str) {
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                warn!("Failed to read seed file {path}: {e}");
+                return;
+            }
+        };
+        let seed: SeedFile = match serde_json::from_str(&content) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!("Failed to parse seed file: {e}");
+                return;
+            }
+        };
+
+        let mut buf = self.signals.write();
+        let mut loaded = 0usize;
+        // Seed records are newest-first; reverse to insert chronologically
+        for rec in seed.data.iter().rev() {
+            let ts = rec.timestamp.parse::<DateTime<Utc>>().unwrap_or_default();
+            let stored = StoredSignal {
+                buy_exchange: rec.buy_exchange.clone(),
+                sell_exchange: rec.sell_exchange.clone(),
+                symbol: rec.coin.clone(),
+                net_spread_pct: rec.premium_pct,
+                gross_spread_pct: rec.premium_pct,
+                estimated_profit_usd: rec.est_profit_usdt,
+                max_qty: rec.est_qty,
+                buy_price_usd: rec.buy_ask_usdt,
+                sell_price_usd: rec.sell_bid_usdt,
+                timestamp: ts,
+            };
+            if buf.len() >= MAX_SIGNALS {
+                buf.pop_front();
+            }
+            buf.push_back(stored);
+            loaded += 1;
+        }
+        info!("Loaded {loaded} seed signals from {path}");
     }
 
     // -- Signals --
@@ -205,7 +266,7 @@ impl DataStore {
 
         let recent_signals: Vec<StoredSignal> = {
             let buf = self.signals.read();
-            buf.iter().rev().take(100).cloned().collect()
+            buf.iter().rev().take(200).cloned().collect()
         };
 
         StateSnapshot {

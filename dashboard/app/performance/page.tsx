@@ -45,7 +45,7 @@ export default function PerformancePage() {
   const cards = data
     ? [
         {
-          label: "预估年化收益率",
+          label: "年化收益率",
           value: `${fmtNum(data.annualized_return, 1)}%`,
           color: data.annualized_return >= 0 ? "var(--green)" : "var(--red)",
         },
@@ -60,7 +60,7 @@ export default function PerformancePage() {
           color: data.avg_spread >= 0 ? "var(--green)" : "var(--red)",
         },
         {
-          label: "预估利润 (USD)",
+          label: "累计利润 (USD)",
           value: `$${fmtNum(data.total_profit)}`,
           color: data.total_profit >= 0 ? "var(--green)" : "var(--red)",
         },
@@ -160,7 +160,7 @@ export default function PerformancePage() {
                 style={{ borderColor: "var(--border)", background: "var(--bg-card)" }}
               >
                 <h3 className="text-xs font-medium mb-3" style={{ color: "var(--text-secondary)" }}>
-                  累计预估利润 (USD)
+                  累计利润 (USD)
                 </h3>
                 <CumulativeChart data={data.cumulative_profit} />
               </div>

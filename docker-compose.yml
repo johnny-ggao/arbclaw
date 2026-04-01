@@ -4,6 +4,8 @@ services:
     container_name: arbclaw-engine
     environment:
       - RUST_LOG=info
+    volumes:
+      - ./data:/data:ro
     restart: unless-stopped
 
   dashboard:

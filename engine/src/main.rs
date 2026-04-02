@@ -5,8 +5,10 @@ mod store;
 mod strategy;
 mod ws_server;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
+use tokio::time::{interval, Duration};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -83,126 +85,161 @@ async fn main() {
     let lt = latency_tracker.clone();
     tokio::spawn(async move { feeds::bithumb::run(tx, ob, lt).await });
 
-    // Spawn orderbook forwarder (broadcasts to WS clients)
-    let ws_bc_ob = ws_broadcast.clone();
-    let mut ob_rx = ob_tx.subscribe();
-    tokio::spawn(async move {
-        loop {
-            match ob_rx.recv().await {
-                Ok(ob) => {
-                    broadcast_message(&ws_bc_ob, &WsMessage::OrderBook(ob));
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    warn!("orderbook forwarder lagged by {n}");
-                }
-                Err(_) => break,
-            }
-        }
-    });
+    // Batched WS push buffers (flushed at 1Hz)
+    type TickerKey = (models::Exchange, models::Symbol);
+    let mut pending_tickers: HashMap<TickerKey, models::NormalizedTicker> = HashMap::new();
+    let mut pending_signals: Vec<models::ArbitrageSignal> = Vec::new();
+    let mut pending_rate: Option<models::ExchangeRate> = None;
+    let mut pending_latency: Option<LatencyReport> = None;
+    let mut pending_orderbooks: HashMap<String, OrderBookUpdate> = HashMap::new();
 
+    let mut ob_rx = ob_tx.subscribe();
     let mut ticker_rx = ticker_tx.subscribe();
     let mut signal_count: u64 = 0;
     let mut tick_count: u64 = 0;
+    let mut flush_interval = interval(Duration::from_secs(1));
 
-    info!("Processing loop started. WS server on ws://0.0.0.0:{WS_PORT}/ws");
+    info!("Processing loop started (1Hz WS push). WS server on ws://0.0.0.0:{WS_PORT}/ws");
     info!("REST APIs: /api/performance, /api/latency, /api/snapshot, /api/memory");
 
     loop {
-        match ticker_rx.recv().await {
-            Ok(ticker) => {
-                tick_count += 1;
-                if tick_count % 5000 == 0 {
-                    info!("processed {tick_count} ticks, {signal_count} signals generated");
-                    let mem = data_store.memory_usage();
-                    info!(
-                        "MEMORY: signals={}/{} tickers={} entries ({} pairs) rates={}/{} ~{:.1}MB",
-                        mem.signals_count, mem.signals_cap,
-                        mem.ticker_total_entries, mem.ticker_pairs,
-                        mem.rates_count, mem.rates_cap,
-                        mem.estimated_mb,
-                    );
+        tokio::select! {
+            // --- Orderbook updates: buffer latest per key ---
+            result = ob_rx.recv() => {
+                match result {
+                    Ok(ob) => {
+                        let key = format!("{}:{}:{:?}", ob.exchange, ob.symbol, ob.quote_currency);
+                        pending_orderbooks.insert(key, ob);
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("orderbook receiver lagged by {n}");
+                    }
+                    Err(_) => break,
                 }
+            }
 
-                let normalized = match normalizer.process(&ticker) {
-                    Some(n) => n,
-                    None => {
-                        if tick_count < 10 {
-                            warn!(
-                                "skipping {} {} (no exchange rate yet)",
-                                ticker.exchange, ticker.symbol
+            // --- Ticker updates: process + buffer ---
+            result = ticker_rx.recv() => {
+                match result {
+                    Ok(ticker) => {
+                        tick_count += 1;
+                        if tick_count % 5000 == 0 {
+                            info!("processed {tick_count} ticks, {signal_count} signals generated");
+                            let mem = data_store.memory_usage();
+                            info!(
+                                "MEMORY: signals={}/{} tickers={} entries ({} pairs) rates={}/{} ~{:.1}MB",
+                                mem.signals_count, mem.signals_cap,
+                                mem.ticker_total_entries, mem.ticker_pairs,
+                                mem.rates_count, mem.rates_cap,
+                                mem.estimated_mb,
                             );
                         }
-                        continue;
+
+                        let normalized = match normalizer.process(&ticker) {
+                            Some(n) => n,
+                            None => {
+                                if tick_count < 10 {
+                                    warn!(
+                                        "skipping {} {} (no exchange rate yet)",
+                                        ticker.exchange, ticker.symbol
+                                    );
+                                }
+                                continue;
+                            }
+                        };
+
+                        if tick_count % 3000 == 0 {
+                            let rate_info = rate_manager
+                                .get_rate()
+                                .map(|r| format!(
+                                    "KRW/USDT={:.2} USDT/USD={:.6} KRW/USD={:.2}",
+                                    r.krw_per_usdt, r.usdt_per_usd, r.krw_per_usd
+                                ))
+                                .unwrap_or_else(|| "NO RATE".to_string());
+                            info!(
+                                "SNAPSHOT: {} {} bid_usd={:.2} ask_usd={:.2} | {rate_info}",
+                                normalized.exchange,
+                                normalized.symbol,
+                                normalized.best_bid_usd,
+                                normalized.best_ask_usd,
+                            );
+                        }
+
+                        // Store immediately (full resolution)
+                        data_store.push_ticker(&normalized);
+
+                        // Buffer for WS push (keep latest per exchange+symbol)
+                        let key = (normalized.exchange, normalized.symbol);
+                        pending_tickers.insert(key, normalized.clone());
+
+                        if ticker.symbol == models::Symbol::BTC && tick_count % 100 == 0 {
+                            if let Some(rate) = rate_manager.get_rate() {
+                                data_store.push_rate(&rate);
+                                pending_rate = Some(rate);
+                            }
+                        }
+
+                        if tick_count % 500 == 0 {
+                            let snapshots = latency_tracker.snapshots();
+                            let report = LatencyReport {
+                                exchanges: snapshots
+                                    .into_iter()
+                                    .map(|s| ExchangeLatency {
+                                        exchange: s.exchange,
+                                        last_rtt_ms: s.last_rtt_ms,
+                                        avg_rtt_ms: s.avg_rtt_ms,
+                                        min_rtt_ms: s.min_rtt_ms,
+                                        max_rtt_ms: s.max_rtt_ms,
+                                        samples: s.samples,
+                                    })
+                                    .collect(),
+                            };
+                            pending_latency = Some(report);
+                        }
+
+                        let signals = arb_engine.update(normalized);
+                        for signal in signals {
+                            signal_count += 1;
+                            data_store.push_signal(&signal);
+                            if signal_count % 500 == 1 {
+                                info!(
+                                    "SIGNAL #{signal_count}: {} {}: {} → {} net={:.3}% profit=${:.2}",
+                                    signal.symbol,
+                                    signal.buy_exchange,
+                                    signal.buy_exchange,
+                                    signal.sell_exchange,
+                                    signal.net_spread_pct,
+                                    signal.estimated_profit_usd,
+                                );
+                            }
+                            pending_signals.push(signal);
+                        }
                     }
-                };
-
-                if tick_count % 3000 == 0 {
-                    let rate_info = rate_manager
-                        .get_rate()
-                        .map(|r| format!(
-                            "KRW/USDT={:.2} USDT/USD={:.6} KRW/USD={:.2}",
-                            r.krw_per_usdt, r.usdt_per_usd, r.krw_per_usd
-                        ))
-                        .unwrap_or_else(|| "NO RATE".to_string());
-                    info!(
-                        "SNAPSHOT: {} {} bid_usd={:.2} ask_usd={:.2} | {rate_info}",
-                        normalized.exchange,
-                        normalized.symbol,
-                        normalized.best_bid_usd,
-                        normalized.best_ask_usd,
-                    );
-                }
-
-                data_store.push_ticker(&normalized);
-                broadcast_message(&ws_broadcast, &WsMessage::Ticker(normalized.clone()));
-
-                if ticker.symbol == models::Symbol::BTC && tick_count % 100 == 0 {
-                    if let Some(rate) = rate_manager.get_rate() {
-                        data_store.push_rate(&rate);
-                        broadcast_message(&ws_broadcast, &WsMessage::Rate(rate));
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("processing loop lagged by {n} messages");
                     }
+                    Err(_) => break,
                 }
+            }
 
-                if tick_count % 500 == 0 {
-                    let snapshots = latency_tracker.snapshots();
-                    let report = LatencyReport {
-                        exchanges: snapshots
-                            .into_iter()
-                            .map(|s| ExchangeLatency {
-                                exchange: s.exchange,
-                                last_rtt_ms: s.last_rtt_ms,
-                                avg_rtt_ms: s.avg_rtt_ms,
-                                min_rtt_ms: s.min_rtt_ms,
-                                max_rtt_ms: s.max_rtt_ms,
-                                samples: s.samples,
-                            })
-                            .collect(),
-                    };
-                    broadcast_message(&ws_broadcast, &WsMessage::Latency(report));
+            // --- 1Hz flush: push all buffered data to WS clients ---
+            _ = flush_interval.tick() => {
+                for (_, ticker) in pending_tickers.drain() {
+                    broadcast_message(&ws_broadcast, &WsMessage::Ticker(ticker));
                 }
-
-                let signals = arb_engine.update(normalized);
-                for signal in signals {
-                    signal_count += 1;
-                    data_store.push_signal(&signal);
-                    if signal_count % 500 == 1 {
-                        info!(
-                            "SIGNAL #{signal_count}: {} {}: {} → {} net={:.3}% profit=${:.2}",
-                            signal.symbol,
-                            signal.buy_exchange,
-                            signal.buy_exchange,
-                            signal.sell_exchange,
-                            signal.net_spread_pct,
-                            signal.estimated_profit_usd,
-                        );
-                    }
+                for signal in pending_signals.drain(..) {
                     broadcast_message(&ws_broadcast, &WsMessage::Signal(signal));
                 }
+                if let Some(rate) = pending_rate.take() {
+                    broadcast_message(&ws_broadcast, &WsMessage::Rate(rate));
+                }
+                if let Some(latency) = pending_latency.take() {
+                    broadcast_message(&ws_broadcast, &WsMessage::Latency(latency));
+                }
+                for (_, ob) in pending_orderbooks.drain() {
+                    broadcast_message(&ws_broadcast, &WsMessage::OrderBook(ob));
+                }
             }
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                warn!("processing loop lagged by {n} messages");
-            }
-            Err(_) => break,
         }
     }
 }

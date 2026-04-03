@@ -88,14 +88,46 @@ impl ArbitrageEngine {
                     continue;
                 }
 
-                // BBO spread (for display)
+                // BBO spread
                 let bbo_spread = (sell_bid - buy_ask) / buy_ask * hundred;
 
-                // Try VWAP from order book depth
+                // USD conversion factors (derived from normalized ticker FX)
+                let buy_to_usd = if !buy_ticker.raw_ask.is_zero() {
+                    buy_ticker.best_ask_usd / buy_ticker.raw_ask
+                } else {
+                    Decimal::ONE
+                };
+                let sell_to_usd = if !sell_ticker.raw_bid.is_zero() {
+                    sell_ticker.best_bid_usd / sell_ticker.raw_bid
+                } else {
+                    Decimal::ONE
+                };
+
                 let buy_book = books.get(&(buy_ex, symbol));
                 let sell_book = books.get(&(sell_ex, symbol));
 
-                // Compute VWAP from order book depth, or fallback to BBO
+                // ── Depth-weighted midprice spread (discovery signal) ──
+                let mid_spread = match (buy_book, sell_book) {
+                    (Some(bb), Some(sb))
+                        if !bb.bids.is_empty()
+                            && !bb.asks.is_empty()
+                            && !sb.bids.is_empty()
+                            && !sb.asks.is_empty() =>
+                    {
+                        match (
+                            depth_weighted_mid(&bb.bids, &bb.asks, buy_to_usd),
+                            depth_weighted_mid(&sb.bids, &sb.asks, sell_to_usd),
+                        ) {
+                            (Some(buy_mid), Some(sell_mid)) if !buy_mid.is_zero() => {
+                                (sell_mid - buy_mid) / buy_mid * hundred
+                            }
+                            _ => bbo_spread,
+                        }
+                    }
+                    _ => bbo_spread,
+                };
+
+                // ── VWAP execution spread ──
                 let bbo_fallback = || {
                     let mq = (self.trade_amount_usd / buy_ask)
                         .min(buy_ticker.best_ask_qty)
@@ -109,17 +141,6 @@ impl ArbitrageEngine {
                         if bb.asks.is_empty() || sb.bids.is_empty() {
                             bbo_fallback()
                         } else {
-                            let buy_to_usd = if !buy_ticker.raw_ask.is_zero() {
-                                buy_ticker.best_ask_usd / buy_ticker.raw_ask
-                            } else {
-                                Decimal::ONE
-                            };
-                            let sell_to_usd = if !sell_ticker.raw_bid.is_zero() {
-                                sell_ticker.best_bid_usd / sell_ticker.raw_bid
-                            } else {
-                                Decimal::ONE
-                            };
-
                             match vwap_take_asks(&bb.asks, self.trade_amount_usd, buy_to_usd) {
                                 Some((vb_full, qty_bought)) => {
                                     match vwap_take_bids(&sb.bids, qty_bought, sell_to_usd) {
@@ -153,8 +174,8 @@ impl ArbitrageEngine {
                         bbo_fallback()
                     };
 
-                // Use VWAP spread for threshold judgment
-                if vwap_spread < self.min_spread {
+                // mid_spread discovers opportunities; vwap_spread verifies executability
+                if mid_spread < self.min_spread {
                     continue;
                 }
 
@@ -166,11 +187,12 @@ impl ArbitrageEngine {
                     net_spread_pct: bbo_spread,
                     max_qty,
                     estimated_profit_usd: profit,
-                    buy_price_usd: buy_ask,   // BBO for display
-                    sell_price_usd: sell_bid,  // BBO for display
+                    buy_price_usd: buy_ask,
+                    sell_price_usd: sell_bid,
                     vwap_buy_usd: vwap_buy,
                     vwap_sell_usd: vwap_sell,
                     vwap_spread_pct: vwap_spread,
+                    mid_spread_pct: mid_spread,
                     timestamp: now,
                 });
             }
@@ -178,6 +200,41 @@ impl ArbitrageEngine {
 
         signals
     }
+}
+
+// ── Depth-weighted midprice ─────────────────────────────────
+
+/// Compute depth-weighted midprice:
+///   weighted_bid = Σ(price_i × qty_i) / Σ(qty_i)  for all bid levels
+///   weighted_ask = Σ(price_i × qty_i) / Σ(qty_i)  for all ask levels
+///   mid = (weighted_bid + weighted_ask) / 2
+fn depth_weighted_mid(
+    bids: &[PriceLevel],
+    asks: &[PriceLevel],
+    to_usd: Decimal,
+) -> Option<Decimal> {
+    let (bid_pq, bid_q) = bids.iter().fold(
+        (Decimal::ZERO, Decimal::ZERO),
+        |(sum_pq, sum_q), level| {
+            let price_usd = level.price * to_usd;
+            (sum_pq + price_usd * level.qty, sum_q + level.qty)
+        },
+    );
+    let (ask_pq, ask_q) = asks.iter().fold(
+        (Decimal::ZERO, Decimal::ZERO),
+        |(sum_pq, sum_q), level| {
+            let price_usd = level.price * to_usd;
+            (sum_pq + price_usd * level.qty, sum_q + level.qty)
+        },
+    );
+
+    if bid_q.is_zero() || ask_q.is_zero() {
+        return None;
+    }
+
+    let weighted_bid = bid_pq / bid_q;
+    let weighted_ask = ask_pq / ask_q;
+    Some((weighted_bid + weighted_ask) / Decimal::TWO)
 }
 
 // ── VWAP helpers ────────────────────────────────────────────

@@ -116,6 +116,7 @@ export function useWebSocket(): DashboardState {
             vwap_buy_usd: String(s.vwap_buy_usd ?? s.buy_price_usd),
             vwap_sell_usd: String(s.vwap_sell_usd ?? s.sell_price_usd),
             vwap_spread_pct: String(s.vwap_spread_pct ?? s.gross_spread_pct),
+            mid_spread_pct: String(s.mid_spread_pct ?? s.gross_spread_pct),
             timestamp: s.timestamp,
             id: i + 1,
             receivedAt: new Date(s.timestamp).getTime(),

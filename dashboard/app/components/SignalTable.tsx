@@ -14,7 +14,7 @@ function timeAgo(ts: number): string {
 }
 
 export default function SignalTable({ signals }: Props) {
-  const profitable = signals.filter(s => parseFloat(s.vwap_spread_pct ?? s.gross_spread_pct) >= 2.0);
+  const profitable = signals.filter(s => parseFloat(s.mid_spread_pct ?? s.gross_spread_pct) >= 2.0);
   const rows = profitable.length > 0 ? profitable.slice(0, 50) : signals.slice(0, 50);
 
   return (
@@ -35,8 +35,8 @@ export default function SignalTable({ signals }: Props) {
             <thead>
               <tr style={{ borderBottom: "1px solid var(--border)" }}>
                 <th className="px-2 sm:px-4 py-1.5 text-left text-xs font-normal" style={{ color: "var(--text-muted)" }}>Pair</th>
-                <th className="px-2 sm:px-4 py-1.5 text-right text-xs font-normal" style={{ color: "var(--text-muted)" }}>VWAP</th>
-                <th className="px-2 sm:px-4 py-1.5 text-right text-xs font-normal hidden sm:table-cell" style={{ color: "var(--text-muted)" }}>BBO</th>
+                <th className="px-2 sm:px-4 py-1.5 text-right text-xs font-normal" style={{ color: "var(--text-muted)" }}>Mid</th>
+                <th className="px-2 sm:px-4 py-1.5 text-right text-xs font-normal hidden sm:table-cell" style={{ color: "var(--text-muted)" }}>VWAP</th>
                 <th className="px-2 sm:px-4 py-1.5 text-right text-xs font-normal hidden sm:table-cell" style={{ color: "var(--text-muted)" }}>Profit</th>
                 <th className="px-2 sm:px-4 py-1.5 text-right text-xs font-normal hidden sm:table-cell" style={{ color: "var(--text-muted)" }}>Qty</th>
                 <th className="px-2 sm:px-4 py-1.5 text-right text-xs font-normal" style={{ color: "var(--text-muted)" }}>Time</th>
@@ -44,10 +44,10 @@ export default function SignalTable({ signals }: Props) {
             </thead>
             <tbody>
               {rows.map(s => {
+                const mid = parseFloat(s.mid_spread_pct ?? s.gross_spread_pct);
                 const vwap = parseFloat(s.vwap_spread_pct ?? s.gross_spread_pct);
-                const bbo = parseFloat(s.gross_spread_pct);
                 const profit = parseFloat(s.estimated_profit_usd);
-                const ok = vwap >= 2.0;
+                const ok = mid >= 2.0;
                 return (
                   <tr
                     key={s.id}
@@ -64,10 +64,10 @@ export default function SignalTable({ signals }: Props) {
                       </span>
                     </td>
                     <td className="px-2 sm:px-4 py-1.5 text-xs text-right font-medium" style={{ color: ok ? "var(--green)" : "var(--red)" }}>
-                      {vwap >= 0 ? "+" : ""}{vwap.toFixed(3)}%
+                      {mid >= 0 ? "+" : ""}{mid.toFixed(3)}%
                     </td>
-                    <td className="px-2 sm:px-4 py-1.5 text-xs text-right hidden sm:table-cell" style={{ color: bbo >= 0 ? "var(--green)" : "var(--red)" }}>
-                      {bbo >= 0 ? "+" : ""}{bbo.toFixed(3)}%
+                    <td className="px-2 sm:px-4 py-1.5 text-xs text-right hidden sm:table-cell" style={{ color: vwap >= 2.0 ? "var(--green)" : "var(--red)" }}>
+                      {vwap >= 0 ? "+" : ""}{vwap.toFixed(3)}%
                     </td>
                     <td className="px-2 sm:px-4 py-1.5 text-xs text-right hidden sm:table-cell" style={{ color: profit >= 0 ? "var(--green)" : "var(--red)" }}>
                       ${profit.toFixed(2)}

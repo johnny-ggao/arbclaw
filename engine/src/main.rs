@@ -1,6 +1,8 @@
+mod config;
 mod feeds;
 mod models;
 mod normalizer;
+mod rates;
 mod store;
 mod strategy;
 mod ws_server;
@@ -12,9 +14,11 @@ use tokio::time::{interval, Duration};
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
+use config::EngineConfig;
 use feeds::latency::LatencyTracker;
 use models::{ExchangeLatency, LatencyReport, OrderBookUpdate, Ticker, WsMessage};
-use normalizer::{Normalizer, RateManager, spawn_cryprice_poller};
+use normalizer::Normalizer;
+use rates::{spawn_krw_usd_poller, RateManager};
 use store::DataStore;
 use strategy::ArbitrageEngine;
 use ws_server::{WsServer, broadcast_message};
@@ -38,7 +42,16 @@ async fn main() {
     let (ticker_tx, _) = broadcast::channel::<Ticker>(4096);
     let (ob_tx, _) = broadcast::channel::<OrderBookUpdate>(2048);
 
-    let rate_manager = Arc::new(RateManager::new());
+    let engine_config = Arc::new(EngineConfig::from_env());
+    info!(
+        "FX config: KRW/USD {:?} poll every {}s (stale after {}s); USDT/USD {:?} pair {}",
+        engine_config.krw_usd_source,
+        engine_config.krw_usd_refresh_secs,
+        engine_config.krw_usd_stale_secs,
+        engine_config.usdt_usd_exchange,
+        engine_config.usdt_usd_pair,
+    );
+    let rate_manager = Arc::new(RateManager::new(&engine_config));
     let normalizer = Arc::new(Normalizer::new(rate_manager.clone()));
     let arb_engine = Arc::new(ArbitrageEngine::new());
     let data_store = Arc::new(DataStore::new());
@@ -60,20 +73,22 @@ async fn main() {
         ws_server.run(WS_PORT, store_clone, latency_clone).await;
     });
 
-    // Spawn Cryprice KRW/USD rate poller (scolkg.com, refreshes every 60s)
-    spawn_cryprice_poller(rate_manager.clone(), 60);
+    spawn_krw_usd_poller(rate_manager.clone(), engine_config.clone());
 
     // Spawn feeds
     let tx = ticker_tx.clone();
     let ob = ob_tx.clone();
     let lt = latency_tracker.clone();
     let rm = rate_manager.clone();
-    tokio::spawn(async move { feeds::binance::run(tx, ob, lt, rm).await });
+    let cfg = engine_config.clone();
+    tokio::spawn(async move { feeds::binance::run(tx, ob, lt, rm, cfg).await });
 
     let tx = ticker_tx.clone();
     let ob = ob_tx.clone();
     let lt = latency_tracker.clone();
-    tokio::spawn(async move { feeds::bybit::run(tx, ob, lt).await });
+    let rm = rate_manager.clone();
+    let cfg = engine_config.clone();
+    tokio::spawn(async move { feeds::bybit::run(tx, ob, lt, rm, cfg).await });
 
     let tx = ticker_tx.clone();
     let ob = ob_tx.clone();

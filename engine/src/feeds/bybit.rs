@@ -11,7 +11,9 @@ use std::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
 
+use crate::config::{EngineConfig, UsdtUsdExchange};
 use crate::models::{Exchange, OrderBookUpdate, PriceLevel, QuoteCurrency, Symbol, Ticker, ALL_SYMBOLS};
+use crate::rates::RateManager;
 
 use super::connection::connect_ws;
 use super::latency::LatencyTracker;
@@ -104,31 +106,55 @@ fn pair_to_symbol(pair: &str) -> Option<Symbol> {
     }
 }
 
-pub async fn run(tx: TickerSender, ob_tx: OrderBookSender, tracker: Arc<LatencyTracker>) -> Result<()> {
+pub async fn run(
+    tx: TickerSender,
+    ob_tx: OrderBookSender,
+    tracker: Arc<LatencyTracker>,
+    rate_mgr: Arc<RateManager>,
+    config: Arc<EngineConfig>,
+) -> Result<()> {
     loop {
-        if let Err(e) = connect_and_stream(&tx, &ob_tx, &tracker).await {
+        if let Err(e) = connect_and_stream(&tx, &ob_tx, &tracker, &rate_mgr, config.as_ref()).await {
             error!("[Bybit] connection error: {e}, reconnecting in 3s...");
         }
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
 }
 
-async fn connect_and_stream(tx: &TickerSender, ob_tx: &OrderBookSender, tracker: &LatencyTracker) -> Result<()> {
+async fn connect_and_stream(
+    tx: &TickerSender,
+    ob_tx: &OrderBookSender,
+    tracker: &LatencyTracker,
+    rate_mgr: &RateManager,
+    config: &EngineConfig,
+) -> Result<()> {
     info!("[Bybit] connecting to {WS_URL}");
     let ws_stream = connect_ws(WS_URL).await?;
     info!("[Bybit] connected");
     let (mut write, mut read) = ws_stream.split();
 
     // Spot only supports depths: 1, 50, 200, 1000. Use 50 and take top 5.
-    let args: Vec<String> = ALL_SYMBOLS
+    let mut args: Vec<String> = ALL_SYMBOLS
         .iter()
         .map(|s| format!("orderbook.50.{}", symbol_to_pair(s)))
         .collect();
+    if config.usdt_usd_exchange == UsdtUsdExchange::Bybit {
+        args.push(format!("orderbook.1.{}", config.usdt_usd_pair));
+    }
     let sub = serde_json::json!({"op": "subscribe", "args": args});
     write.send(Message::Text(sub.to_string())).await?;
-    info!("[Bybit] subscribed to orderbook.50");
+    info!(
+        "[Bybit] subscribed orderbook.50 ({} pairs){}",
+        ALL_SYMBOLS.len(),
+        if config.usdt_usd_exchange == UsdtUsdExchange::Bybit {
+            format!(" + orderbook.1.{}", config.usdt_usd_pair)
+        } else {
+            String::new()
+        }
+    );
 
     let books: Arc<Mutex<HashMap<Symbol, LocalBook>>> = Arc::new(Mutex::new(HashMap::new()));
+    let fx_book = Mutex::new(LocalBook::new());
 
     let ping_interval = tokio::time::interval(std::time::Duration::from_secs(20));
     tokio::pin!(ping_interval);
@@ -144,7 +170,9 @@ async fn connect_and_stream(tx: &TickerSender, ob_tx: &OrderBookSender, tracker:
                                 let rtt = sent.elapsed().as_secs_f64() * 1000.0;
                                 tracker.record(Exchange::Bybit, rtt);
                             }
-                        } else if let Err(e) = handle_message(&text, tx, ob_tx, &books) {
+                        } else if let Err(e) =
+                            handle_message(&text, tx, ob_tx, &books, &fx_book, rate_mgr, config)
+                        {
                             warn!("[Bybit] parse error: {e}");
                         }
                     }
@@ -187,6 +215,9 @@ fn handle_message(
     tx: &TickerSender,
     ob_tx: &OrderBookSender,
     books: &Arc<Mutex<HashMap<Symbol, LocalBook>>>,
+    fx_book: &Mutex<LocalBook>,
+    rate_mgr: &RateManager,
+    config: &EngineConfig,
 ) -> Result<()> {
     let resp: WsResponse = serde_json::from_str(text)?;
 
@@ -194,6 +225,30 @@ fn handle_message(
         Some(t) => t,
         None => return Ok(()),
     };
+
+    let fx_topic = format!("orderbook.1.{}", config.usdt_usd_pair);
+    if config.usdt_usd_exchange == UsdtUsdExchange::Bybit && topic == fx_topic {
+        let data = resp.data.ok_or_else(|| anyhow::anyhow!("missing data"))?;
+        let msg_type = resp.msg_type.unwrap_or_default();
+        {
+            let mut book = fx_book.lock();
+            match msg_type.as_str() {
+                "snapshot" => book.apply_snapshot(&data.b, &data.a),
+                "delta" => book.apply_delta(&data.b, &data.a),
+                _ => return Ok(()),
+            }
+            let tb = book.top_bids(1);
+            let ta = book.top_asks(1);
+            if !tb.is_empty() && !ta.is_empty() {
+                let mid = (tb[0].price + ta[0].price) / Decimal::TWO;
+                if !mid.is_zero() {
+                    rate_mgr.update_usdt_usd_from_pair_mid(mid);
+                }
+            }
+        }
+        return Ok(());
+    }
+
     if !topic.starts_with("orderbook.") {
         return Ok(());
     }

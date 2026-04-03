@@ -9,8 +9,9 @@ use std::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, info, warn};
 
+use crate::config::{EngineConfig, UsdtUsdExchange};
 use crate::models::{Exchange, OrderBookUpdate, PriceLevel, QuoteCurrency, Symbol, Ticker, ALL_SYMBOLS};
-use crate::normalizer::RateManager;
+use crate::rates::RateManager;
 
 use super::connection::connect_ws;
 use super::latency::LatencyTracker;
@@ -67,9 +68,10 @@ pub async fn run(
     ob_tx: OrderBookSender,
     tracker: Arc<LatencyTracker>,
     rate_mgr: Arc<RateManager>,
+    config: Arc<EngineConfig>,
 ) -> Result<()> {
     loop {
-        if let Err(e) = connect_and_stream(&tx, &ob_tx, &tracker, &rate_mgr).await {
+        if let Err(e) = connect_and_stream(&tx, &ob_tx, &tracker, &rate_mgr, config.as_ref()).await {
             error!("[Binance] connection error: {e}, reconnecting in 3s...");
         }
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -81,6 +83,7 @@ async fn connect_and_stream(
     ob_tx: &OrderBookSender,
     tracker: &LatencyTracker,
     rate_mgr: &RateManager,
+    config: &EngineConfig,
 ) -> Result<()> {
     let mut streams: Vec<String> = ALL_SYMBOLS
         .iter()
@@ -92,7 +95,9 @@ async fn connect_and_stream(
             ]
         })
         .collect();
-    streams.push("usdcusdt@bookTicker".to_string());
+    if config.usdt_usd_exchange == UsdtUsdExchange::Binance {
+        streams.push(format!("{}@bookTicker", config.usdt_pair_lower()));
+    }
     let url = format!("{}?streams={}", WS_URL, streams.join("/"));
 
     info!("[Binance] connecting to {url}");
@@ -109,7 +114,7 @@ async fn connect_and_stream(
             msg = read.next() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if let Err(e) = handle_message(&text, tx, ob_tx, rate_mgr) {
+                        if let Err(e) = handle_message(&text, tx, ob_tx, rate_mgr, config) {
                             warn!("[Binance] parse error: {e}");
                         }
                     }
@@ -159,6 +164,7 @@ fn handle_message(
     tx: &TickerSender,
     ob_tx: &OrderBookSender,
     rate_mgr: &RateManager,
+    config: &EngineConfig,
 ) -> Result<()> {
     // Combined stream format: check if it has "stream" field
     let v: serde_json::Value = serde_json::from_str(text)?;
@@ -191,7 +197,7 @@ fn handle_message(
 
         if stream.contains("@bookTicker") {
             let bt: BookTicker = serde_json::from_value(data.clone())?;
-            return handle_book_ticker(&bt, tx, rate_mgr);
+            return handle_book_ticker(&bt, tx, rate_mgr, config);
         }
 
         return Ok(());
@@ -199,16 +205,21 @@ fn handle_message(
 
     // Non-combined format (shouldn't happen with combined streams, but fallback)
     let bt: BookTicker = serde_json::from_str(text)?;
-    handle_book_ticker(&bt, tx, rate_mgr)
+    handle_book_ticker(&bt, tx, rate_mgr, config)
 }
 
-fn handle_book_ticker(bt: &BookTicker, tx: &TickerSender, rate_mgr: &RateManager) -> Result<()> {
-    if bt.s.to_uppercase() == "USDCUSDT" {
+fn handle_book_ticker(
+    bt: &BookTicker,
+    tx: &TickerSender,
+    rate_mgr: &RateManager,
+    config: &EngineConfig,
+) -> Result<()> {
+    if config.usdt_usd_exchange == UsdtUsdExchange::Binance && bt.s.to_uppercase() == config.usdt_usd_pair {
         let bid = Decimal::from_str(&bt.b)?;
         let ask = Decimal::from_str(&bt.a)?;
         let mid = (bid + ask) / Decimal::TWO;
         if !mid.is_zero() {
-            rate_mgr.update_usdt_usd_rate(Decimal::ONE / mid);
+            rate_mgr.update_usdt_usd_from_pair_mid(mid);
         }
         return Ok(());
     }

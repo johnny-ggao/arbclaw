@@ -33,11 +33,18 @@ function normalize(
   quote: "USDT" | "KRW",
   rate: RateInfo | null,
 ): Level {
-  if (quote === "KRW" && rate) {
+  if (quote === "KRW" && rate && rate.krw_per_usd > 0) {
     return {
-      priceUsd: (p / rate.krw_per_usdt) * rate.usdt_per_usd,
+      priceUsd: p / rate.krw_per_usd,
       qty: q,
       raw: `₩${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}`,
+    };
+  }
+  if (quote === "USDT" && rate) {
+    return {
+      priceUsd: p * rate.usdt_per_usd,
+      qty: q,
+      raw: "",
     };
   }
   return { priceUsd: p, qty: q, raw: "" };

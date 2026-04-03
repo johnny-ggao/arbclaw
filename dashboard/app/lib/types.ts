@@ -38,6 +38,9 @@ export interface ArbitrageSignal {
   estimated_profit_usd: string;
   buy_price_usd: string;
   sell_price_usd: string;
+  vwap_buy_usd: string;
+  vwap_sell_usd: string;
+  vwap_spread_pct: string;
   timestamp: string;
 }
 

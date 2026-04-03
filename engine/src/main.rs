@@ -123,6 +123,7 @@ async fn main() {
             result = ob_rx.recv() => {
                 match result {
                     Ok(ob) => {
+                        arb_engine.update_order_book(ob.clone());
                         let key = format!("{}:{}:{:?}", ob.exchange, ob.symbol, ob.quote_currency);
                         pending_orderbooks.insert(key, ob);
                     }

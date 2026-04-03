@@ -39,6 +39,9 @@ pub struct StoredSignal {
     pub max_qty: f64,
     pub buy_price_usd: f64,
     pub sell_price_usd: f64,
+    pub vwap_buy_usd: f64,
+    pub vwap_sell_usd: f64,
+    pub vwap_spread_pct: f64,
     pub timestamp: DateTime<Utc>,
 }
 
@@ -54,6 +57,9 @@ impl From<&ArbitrageSignal> for StoredSignal {
             max_qty: s.max_qty.to_f64().unwrap_or(0.0),
             buy_price_usd: s.buy_price_usd.to_f64().unwrap_or(0.0),
             sell_price_usd: s.sell_price_usd.to_f64().unwrap_or(0.0),
+            vwap_buy_usd: s.vwap_buy_usd.to_f64().unwrap_or(0.0),
+            vwap_sell_usd: s.vwap_sell_usd.to_f64().unwrap_or(0.0),
+            vwap_spread_pct: s.vwap_spread_pct.to_f64().unwrap_or(0.0),
             timestamp: s.timestamp,
         }
     }
@@ -176,6 +182,9 @@ impl DataStore {
                 max_qty: rec.est_qty,
                 buy_price_usd: rec.buy_ask_usdt,
                 sell_price_usd: rec.sell_bid_usdt,
+                vwap_buy_usd: rec.buy_ask_usdt,
+                vwap_sell_usd: rec.sell_bid_usdt,
+                vwap_spread_pct: rec.premium_pct,
                 timestamp: ts,
             };
             if buf.len() >= MAX_SIGNALS {

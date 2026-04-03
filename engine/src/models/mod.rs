@@ -137,6 +137,9 @@ pub struct ArbitrageSignal {
     pub estimated_profit_usd: Decimal,
     pub buy_price_usd: Decimal,
     pub sell_price_usd: Decimal,
+    pub vwap_buy_usd: Decimal,
+    pub vwap_sell_usd: Decimal,
+    pub vwap_spread_pct: Decimal,
     pub timestamp: DateTime<Utc>,
 }
 

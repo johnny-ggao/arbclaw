@@ -122,24 +122,50 @@ impl RateManager {
     }
 }
 
-// --- Frankfurter ------------------------------------------------------------
+// --- Yahoo Finance ----------------------------------------------------------
 
-pub async fn fetch_frankfurter_krw_per_usd(client: &reqwest::Client) -> anyhow::Result<Decimal> {
-    let url = "https://api.frankfurter.app/latest?from=USD&to=KRW";
-    let resp = client.get(url).send().await?.error_for_status()?;
-    let body: FrankfurterLatest = resp.json().await?;
-    let krw = body
-        .rates
-        .get("KRW")
-        .copied()
-        .ok_or_else(|| anyhow::anyhow!("Frankfurter: missing KRW rate"))?;
-    Decimal::from_str(&format!("{krw:.8}"))
-        .map_err(|e| anyhow::anyhow!("Frankfurter KRW parse: {e}"))
+/// Fetch real-time KRW/USD from Yahoo Finance chart API (`KRW=X`).
+pub async fn fetch_yahoo_krw_per_usd(client: &reqwest::Client) -> anyhow::Result<Decimal> {
+    let url = "https://query1.finance.yahoo.com/v8/finance/chart/KRW=X?range=1d&interval=1d";
+    let resp = client
+        .get(url)
+        .header("User-Agent", "arbclaw/1.0")
+        .send()
+        .await?
+        .error_for_status()?;
+    let body: YahooChartResponse = resp.json().await?;
+    let result = body
+        .chart
+        .result
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("Yahoo: empty chart result"))?;
+    let price = result.meta.regular_market_price;
+    if price < 500.0 || price > 5000.0 {
+        return Err(anyhow::anyhow!("Yahoo: implausible KRW/USD rate: {price}"));
+    }
+    Decimal::from_str(&format!("{price:.4}"))
+        .map_err(|e| anyhow::anyhow!("Yahoo KRW parse: {e}"))
 }
 
 #[derive(Debug, Deserialize)]
-struct FrankfurterLatest {
-    rates: std::collections::HashMap<String, f64>,
+struct YahooChartResponse {
+    chart: YahooChart,
+}
+
+#[derive(Debug, Deserialize)]
+struct YahooChart {
+    result: Vec<YahooChartResult>,
+}
+
+#[derive(Debug, Deserialize)]
+struct YahooChartResult {
+    meta: YahooChartMeta,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct YahooChartMeta {
+    regular_market_price: f64,
 }
 
 // --- BOK ECOS ---------------------------------------------------------------
@@ -202,7 +228,7 @@ pub fn spawn_krw_usd_poller(rate_manager: Arc<RateManager>, config: Arc<EngineCo
             interval.tick().await;
 
             let result = match config.krw_usd_source {
-                KrwUsdSource::Frankfurter => fetch_frankfurter_krw_per_usd(&client).await,
+                KrwUsdSource::Yahoo => fetch_yahoo_krw_per_usd(&client).await,
                 KrwUsdSource::Bok => match &config.bok_api_key {
                     Some(key) => fetch_bok_krw_per_usd(&client, key.as_str()).await,
                     None => {
@@ -215,7 +241,7 @@ pub fn spawn_krw_usd_poller(rate_manager: Arc<RateManager>, config: Arc<EngineCo
             match result {
                 Ok(krw) => {
                     let src = match config.krw_usd_source {
-                        KrwUsdSource::Frankfurter => RateSource::Frankfurter,
+                        KrwUsdSource::Yahoo => RateSource::Yahoo,
                         KrwUsdSource::Bok => RateSource::Bok,
                     };
                     rate_manager.store_krw_per_usd(krw, src);

@@ -106,8 +106,10 @@ pub struct ExchangeRate {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum RateSource {
-    Frankfurter,
+    Yahoo,
     Bok,
+    /// Legacy label; kept for serde compatibility with older data.
+    Frankfurter,
     Implied,
     /// Legacy label (older engine builds); kept for serde compatibility.
     Cryprice,
@@ -117,8 +119,9 @@ pub enum RateSource {
 impl fmt::Display for RateSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            RateSource::Frankfurter => write!(f, "Frankfurter"),
+            RateSource::Yahoo => write!(f, "Yahoo"),
             RateSource::Bok => write!(f, "Bok"),
+            RateSource::Frankfurter => write!(f, "Frankfurter"),
             RateSource::Implied => write!(f, "Implied"),
             RateSource::Cryprice => write!(f, "Cryprice"),
             RateSource::External => write!(f, "External"),

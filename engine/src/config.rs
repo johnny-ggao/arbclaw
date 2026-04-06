@@ -2,7 +2,7 @@
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KrwUsdSource {
-    Frankfurter,
+    Yahoo,
     Bok,
 }
 
@@ -14,9 +14,9 @@ pub enum UsdtUsdExchange {
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
-    /// ECB-backed KRW per 1 USD (Frankfurter) or BOK ECOS daily series.
+    /// Yahoo Finance real-time KRW per 1 USD or BOK ECOS daily series.
     pub krw_usd_source: KrwUsdSource,
-    /// How often to refresh KRW/USD from REST (default 600s).
+    /// How often to refresh KRW/USD from REST (default 60s).
     pub krw_usd_refresh_secs: u64,
     /// If REST data is older than this, `get_rate` / KRW normalization treat it as missing.
     pub krw_usd_stale_secs: i64,
@@ -38,13 +38,13 @@ impl EngineConfig {
             .as_str()
         {
             "bok" => KrwUsdSource::Bok,
-            _ => KrwUsdSource::Frankfurter,
+            _ => KrwUsdSource::Yahoo,
         };
 
         let krw_usd_refresh_secs = std::env::var("ARBC_KRW_USD_REFRESH_SECS")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(600);
+            .unwrap_or(60);
 
         let krw_usd_stale_secs = std::env::var("ARBC_KRW_USD_STALE_SECS")
             .ok()

@@ -50,7 +50,7 @@ export interface ExchangeRate {
   krw_per_usdt: string;
   usdt_per_usd: string;
   krw_per_usd: string;
-  source: "Frankfurter" | "Bok" | "Implied" | "Cryprice" | "External";
+  source: "Yahoo" | "Bok" | "Frankfurter" | "Implied" | "Cryprice" | "External";
   timestamp: string;
 }
 
